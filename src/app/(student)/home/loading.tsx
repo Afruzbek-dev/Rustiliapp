@@ -2,7 +2,8 @@ import { Skeleton } from "@/components/ui";
 
 export default function Loading() {
   return (
-    <main className="flex flex-col gap-4 p-4" aria-busy="true" aria-label="Yuklanmoqda">
+    <main role="status" className="flex flex-col gap-4 p-4">
+      <span className="sr-only">Yuklanmoqda</span>
       <Skeleton height="h-8" width="w-48" />
       <div className="flex gap-2">
         <Skeleton height="h-24" />

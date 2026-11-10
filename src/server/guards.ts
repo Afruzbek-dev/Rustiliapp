@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 
@@ -14,7 +15,7 @@ async function currentUserAndRole() {
 }
 
 /** All guards query through the user-scoped client, so RLS stays the real authority. */
-export async function requireStudent() {
+export const requireStudent = cache(async function requireStudent() {
   const { supabase, user, role } = await currentUserAndRole();
   if (role === "student") {
     const nowIso = new Date().toISOString();
@@ -28,7 +29,7 @@ export async function requireStudent() {
     if (!data || data.length === 0) redirect("/login?state=pending");
   }
   return { user, role };
-}
+});
 
 export async function requireCurator() {
   const { user, role } = await currentUserAndRole();

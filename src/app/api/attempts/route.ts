@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import { handleAttemptRequest, readJsonBody } from "@/server/attempts";
 import { createSupabaseAttemptStore } from "@/server/attempts-store";
+import { createGrammarTaskHook } from "@/server/grammar-task";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +25,11 @@ export async function POST(request: Request) {
     );
   }
 
-  const store = createSupabaseAttemptStore(user, createServiceClient());
-  const { status, json } = await handleAttemptRequest({ store }, { userId, body: parsed.body });
+  const service = createServiceClient();
+  const store = createSupabaseAttemptStore(user, service);
+  const { status, json } = await handleAttemptRequest(
+    { store, onCorrect: createGrammarTaskHook(service) },
+    { userId, body: parsed.body },
+  );
   return NextResponse.json(json, { status, headers: { "Cache-Control": "no-store" } });
 }

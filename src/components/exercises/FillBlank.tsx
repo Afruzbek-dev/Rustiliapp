@@ -7,7 +7,7 @@ import { FeedbackSheet } from "./FeedbackSheet";
 import type { ExerciseProps } from "./styles";
 import { useAttempt } from "./useAttempt";
 
-export function FillBlank({ exerciseId, payload, onDone }: ExerciseProps<FillBlankPayload>) {
+export function FillBlank({ exerciseId, payload, onDone, onExit }: ExerciseProps<FillBlankPayload>) {
   const [index, setIndex] = useState(0);
   const [value, setValue] = useState("");
   const attempt = useAttempt(exerciseId);
@@ -72,6 +72,7 @@ export function FillBlank({ exerciseId, payload, onDone }: ExerciseProps<FillBla
         )}
       </form>
       <FeedbackSheet
+        onExit={onExit}
         status={attempt.status}
         result={attempt.result}
         error={attempt.error}

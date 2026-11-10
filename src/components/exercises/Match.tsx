@@ -13,7 +13,7 @@ function expectedMap(v: unknown): Record<string, string> | null {
   return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, string>) : null;
 }
 
-export function Match({ exerciseId, payload, onDone }: ExerciseProps<MatchPayload>) {
+export function Match({ exerciseId, payload, onDone, onExit }: ExerciseProps<MatchPayload>) {
   const [selected, setSelected] = useState<string | null>(null);
   // leftId -> rightId, in the order the pairs were made
   const [pairs, setPairs] = useState<[string, string][]>([]);
@@ -140,6 +140,7 @@ export function Match({ exerciseId, payload, onDone }: ExerciseProps<MatchPayloa
         </ul>
       </div>
       <FeedbackSheet
+        onExit={onExit}
         status={attempt.status}
         result={attempt.result}
         error={attempt.error}

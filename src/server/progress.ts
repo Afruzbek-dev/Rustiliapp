@@ -42,7 +42,7 @@ export interface ProgressStore {
 const PER_ITEM_TYPES = new Set(["classify", "fill_blank", "choose"]);
 
 /** Item ids that must each be answered correctly for a per-item exercise (its key's entries). */
-function requiredItems(type: string, key: unknown): (string | null)[] {
+export function requiredItems(type: string, key: unknown): (string | null)[] {
   if (PER_ITEM_TYPES.has(type) && key && typeof key === "object" && !Array.isArray(key)) {
     return Object.keys(key as Record<string, unknown>);
   }

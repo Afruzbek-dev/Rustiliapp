@@ -14,6 +14,8 @@ export interface FeedbackSheetProps {
   hint?: string;
   onContinue: () => void;
   onRetry: () => void;
+  /** When set, non-retryable errors (forbidden/notfound/invalid) offer an "Orqaga" exit. */
+  onExit?: () => void;
 }
 
 const ERROR_TEXT: Record<AttemptError, string> = {
@@ -36,6 +38,7 @@ export function FeedbackSheet({
   hint,
   onContinue,
   onRetry,
+  onExit,
 }: FeedbackSheetProps) {
   const ref = useRef<HTMLDivElement>(null);
   const visible = status === "done" || status === "error";
@@ -96,6 +99,10 @@ export function FeedbackSheet({
           ) : RETRYABLE.includes(error ?? "network") ? (
             <Button fullWidth size="lg" onClick={onRetry}>
               Qayta urinish
+            </Button>
+          ) : onExit ? (
+            <Button fullWidth size="lg" variant="secondary" onClick={onExit}>
+              Orqaga
             </Button>
           ) : null
         ) : (

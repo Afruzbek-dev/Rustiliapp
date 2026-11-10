@@ -1,0 +1,24 @@
+{
+  "update_id": 106,
+  "message": {
+    "message_id": 2,
+    "date": 1760000010,
+    "chat": {
+      "id": -100,
+      "type": "group",
+      "title": "G"
+    },
+    "from": {
+      "id": 777,
+      "is_bot": false,
+      "first_name": "Ali",
+      "last_name": "Valiyev",
+      "username": "ali"
+    },
+    "contact": {
+      "phone_number": "998 90 123-45-67",
+      "first_name": "Ali",
+      "user_id": 777
+    }
+  }
+}

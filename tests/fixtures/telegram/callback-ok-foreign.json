@@ -1,0 +1,23 @@
+{
+  "update_id": 202,
+  "callback_query": {
+    "id": "cb202",
+    "from": {
+      "id": 999,
+      "is_bot": false,
+      "first_name": "Ali"
+    },
+    "message": {
+      "message_id": 5,
+      "date": 1760000020,
+      "chat": {
+        "id": 999,
+        "type": "private",
+        "first_name": "Ali"
+      },
+      "text": "x"
+    },
+    "chat_instance": "1",
+    "data": "lg:ok:abcdefghijklmnopqrstuvwxyz012345"
+  }
+}

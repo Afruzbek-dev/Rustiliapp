@@ -3,7 +3,7 @@ import { z } from "zod";
 const serverSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   TELEGRAM_BOT_TOKEN: z.string().min(1),
-  TELEGRAM_WEBHOOK_SECRET: z.string().min(1),
+  TELEGRAM_WEBHOOK_SECRET: z.string().min(32).regex(/^[A-Za-z0-9_-]+$/),
   TELEGRAM_BOT_USERNAME: z.string().min(1),
   TELEGRAM_ARCHIVE_CHAT_ID: z.string().min(1),
   TELEGRAM_STAFF_CHAT_ID: z.string().min(1),

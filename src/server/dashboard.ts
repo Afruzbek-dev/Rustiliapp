@@ -2,6 +2,8 @@ import "server-only";
 import { createClient } from "@/lib/supabase/server";
 import { tashkentDay } from "@/lib/gamification/day";
 import { currentStreak } from "@/lib/gamification/streak";
+import { getStudyCounts } from "./srs";
+import { supabaseQueueDb } from "./srs-store";
 import { computePathStatus, type PartProgress } from "@/lib/path-status";
 
 export const WEEKDAY_LABELS = ["Du", "Se", "Ch", "Pa", "Ju", "Sh", "Ya"] as const;
@@ -302,14 +304,10 @@ export function supabaseDashboardDb(sb: Sb): DashboardDb {
       };
     },
 
+    // The same rule as /words (studied due cards + new cards still allowed today), so the home
+    // number equals what the flashcard screen serves.
     async dueCards(studentId, nowIso) {
-      const res = await sb
-        .from("srs_cards")
-        .select("word_id", { count: "exact", head: true })
-        .eq("student_id", studentId)
-        .lte("due_at", nowIso);
-      if (res.error) throw new Error(`dashboard: due cards: ${res.error.message}`);
-      return res.count ?? 0;
+      return (await getStudyCounts(supabaseQueueDb(sb), studentId, new Date(nowIso))).total;
     },
   };
 }

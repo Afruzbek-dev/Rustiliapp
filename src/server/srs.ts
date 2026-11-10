@@ -29,6 +29,8 @@ export interface CardRow {
   /** ISO timestamp */
   dueAt: string;
   isDifficult: boolean;
+  /** Id of the last applied grade request (idempotency), null when none. */
+  lastRequestId: string | null;
 }
 
 export interface QueueRow extends CardRow {
@@ -39,6 +41,10 @@ export interface QueueRow extends CardRow {
 export interface SrsQueueDb {
   /** Studied cards (first_studied_at not null) with due_at <= now, oldest due first. */
   dueCards(studentId: string, nowIso: string, limit: number): Promise<QueueRow[]>;
+  /** Real number of studied due cards (exact count, not limited by DUE_LIMIT). */
+  countDue(studentId: string, nowIso: string): Promise<number>;
+  /** Number of never studied cards. */
+  countNew(studentId: string): Promise<number>;
   /** Never studied cards (first_studied_at null), stable order. */
   newCards(studentId: string, limit: number): Promise<QueueRow[]>;
   /** Cards whose first_studied_at is >= sinceIso (i.e. new cards introduced today). */
@@ -112,23 +118,46 @@ export async function getStudyQueueWith(
   studentId: string,
   now: Date = new Date(),
 ): Promise<StudyQueue> {
-  const [due, introduced] = await Promise.all([
+  const [due, dueTotal, introduced] = await Promise.all([
     db.dueCards(studentId, now.toISOString(), DUE_LIMIT),
+    db.countDue(studentId, now.toISOString()),
     db.newStudiedSince(studentId, tashkentDayStart(now).toISOString()),
   ]);
   const remaining = Math.max(0, DAILY_NEW_LIMIT - introduced);
   const fresh = remaining > 0 ? (await db.newCards(studentId, remaining)).slice(0, remaining) : [];
   return {
     cards: [...due.map((r) => toStudyCard(r, false, now)), ...fresh.map((r) => toStudyCard(r, true, now))],
-    dueCount: due.length,
+    dueCount: dueTotal,
     newCount: fresh.length,
     newRemainingToday: remaining - fresh.length,
   };
 }
 
+/**
+ * How many cards /words serves right now, without fetching them: studied due cards (capped like the
+ * queue) plus the new cards still allowed today. The home screen shows this number, so it always
+ * equals getStudyQueueWith(...).cards.length.
+ */
+export async function getStudyCounts(
+  db: SrsQueueDb,
+  studentId: string,
+  now: Date = new Date(),
+): Promise<{ due: number; new: number; total: number }> {
+  const [dueTotal, introduced, fresh] = await Promise.all([
+    db.countDue(studentId, now.toISOString()),
+    db.newStudiedSince(studentId, tashkentDayStart(now).toISOString()),
+    db.countNew(studentId),
+  ]);
+  const due = Math.min(dueTotal, DUE_LIMIT);
+  const newCount = Math.min(fresh, Math.max(0, DAILY_NEW_LIMIT - introduced));
+  return { due, new: newCount, total: due + newCount };
+}
+
 // ---------------------------------------------------------------------------------------------
 // Grade / difficult handlers
 // ---------------------------------------------------------------------------------------------
+
+export type ApplyResult = "first" | "applied" | "replay" | "conflict" | "missing";
 
 export interface SrsStore {
   /** Role of the signed-in user (user-scoped client). */
@@ -138,12 +167,17 @@ export interface SrsStore {
    * card does not exist or its word is not visible (not in an active course of the student).
    */
   getCard(studentId: string, wordId: string): Promise<CardRow | null>;
-  /** SERVICE write (srs_apply_grade). true = first study of the card, false = studied before, null = no card. */
+  /**
+   * SERVICE compare-and-swap write (srs_apply_grade): applies `next` only while the card still has
+   * the `expect` state it was computed from.
+   */
   applyGrade(
     studentId: string,
     wordId: string,
     next: { intervalDays: number; ease: number; dueAt: string; reps: number; lapses: number },
-  ): Promise<boolean | null>;
+    expect: { reps: number; lapses: number; dueAt: string },
+    requestId: string | null,
+  ): Promise<ApplyResult>;
   /** SERVICE: daily 'words' task +1. */
   bumpWordsTask(studentId: string): Promise<void>;
   /** SERVICE write; false when the student has no such card. */
@@ -151,7 +185,12 @@ export interface SrsStore {
 }
 
 export const gradeBodySchema = z
-  .object({ wordId: z.string().uuid(), grade: z.enum(["again", "hard", "good"]) })
+  .object({
+    wordId: z.string().uuid(),
+    grade: z.enum(["again", "hard", "good"]),
+    /** Per card-turn id: an exact retry of the same request must not advance the card twice. */
+    requestId: z.string().uuid().optional(),
+  })
   .strict();
 export const difficultBodySchema = z.object({ wordId: z.string().uuid(), value: z.boolean() }).strict();
 
@@ -172,6 +211,8 @@ const publicCard = (c: CardRow) => ({
   dueAt: c.dueAt,
   isDifficult: c.isDifficult,
 });
+
+const NOT_FOUND: HandlerResult = { status: 404, json: { error: "not_found" } };
 
 async function guarded(
   deps: { store: SrsStore },
@@ -201,8 +242,14 @@ export function handleSrsGrade(
     const studentId = req.userId as string;
     const { wordId } = body.data;
 
+    const requestId = body.data.requestId ?? null;
+
     const row = await deps.store.getCard(studentId, wordId);
-    if (!row) return { status: 404, json: { error: "not_found" } };
+    if (!row) return NOT_FOUND;
+    // Exact retry of an already applied request (e.g. the response was lost): answer with the stored state.
+    if (requestId && row.lastRequestId === requestId) {
+      return { status: 200, json: { card: publicCard(row), firstStudy: false, replayed: true } };
+    }
 
     const now = req.now ?? new Date();
     const next = grade(toSrsCard(row), body.data.grade, now);
@@ -213,9 +260,24 @@ export function handleSrsGrade(
       reps: next.reps,
       lapses: next.lapses,
     };
-    const first = await deps.store.applyGrade(studentId, wordId, stored);
-    if (first === null) return { status: 404, json: { error: "not_found" } };
+    const result = await deps.store.applyGrade(
+      studentId,
+      wordId,
+      stored,
+      { reps: row.reps, lapses: row.lapses, dueAt: row.dueAt },
+      requestId,
+    );
+    if (result === "missing") return NOT_FOUND;
+    if (result === "replay" || result === "conflict") {
+      // Someone (another tab, or this very request) got there first: report the card as it is now.
+      const current = await deps.store.getCard(studentId, wordId);
+      if (!current) return NOT_FOUND;
+      return result === "replay"
+        ? { status: 200, json: { card: publicCard(current), firstStudy: false, replayed: true } }
+        : { status: 409, json: { error: "conflict", card: publicCard(current) } };
+    }
 
+    const first = result === "first";
     if (first) {
       // Cosmetic counter: a failure must not turn a stored grade into an error response.
       try {
@@ -242,10 +304,8 @@ export function handleSrsDifficult(
     const studentId = req.userId as string;
     const { wordId, value } = body.data;
     // Same visibility rule as grading: the word must be RLS-visible through the student's own card.
-    if (!(await deps.store.getCard(studentId, wordId))) return { status: 404, json: { error: "not_found" } };
-    if (!(await deps.store.setDifficult(studentId, wordId, value))) {
-      return { status: 404, json: { error: "not_found" } };
-    }
+    if (!(await deps.store.getCard(studentId, wordId))) return NOT_FOUND;
+    if (!(await deps.store.setDifficult(studentId, wordId, value))) return NOT_FOUND;
     return { status: 200, json: { wordId, isDifficult: value } };
   });
 }

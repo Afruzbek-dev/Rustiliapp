@@ -30,7 +30,8 @@ export interface FlashcardProps {
   cards: StudyCard[];
 }
 
-export function Flashcard({ cards }: FlashcardProps) {
+export function Flashcard({ cards: initialCards }: FlashcardProps) {
+  const [cards, setCards] = useState(initialCards);
   const [index, setIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [saving, setSaving] = useState<Grade | null>(null);
@@ -39,6 +40,10 @@ export function Flashcard({ cards }: FlashcardProps) {
     Object.fromEntries(cards.map((c) => [c.wordId, c.isDifficult])),
   );
   const [togglePending, setTogglePending] = useState(false);
+  const [toggleFailed, setToggleFailed] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  // One id per card-turn: an exact retry of the same grade request is applied only once by the server.
+  const turn = useRef<{ wordId: string; id: string | undefined } | null>(null);
   const [speech, setSpeech] = useState(false);
   const busy = useRef(false);
   useEffect(() => setSpeech(canSpeak()), []);
@@ -86,14 +91,40 @@ export function Flashcard({ cards }: FlashcardProps) {
     window.speechSynthesis.speak(u);
   }
 
-  async function post(path: string, body: unknown): Promise<boolean> {
+  /** HTTP status, or 0 on a network failure. */
+  async function post(path: string, body: unknown): Promise<number> {
     try {
       const res = await fetch(path, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return res.ok;
+      return res.status;
+    } catch {
+      return 0;
+    }
+  }
+
+  function requestIdFor(wordId: string): string | undefined {
+    if (turn.current?.wordId !== wordId) {
+      const id = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : undefined;
+      turn.current = { wordId, id };
+    }
+    return turn.current.id;
+  }
+
+  /** The card changed elsewhere (409): show the queue as it is now instead of advancing twice. */
+  async function reloadQueue(): Promise<boolean> {
+    try {
+      const res = await fetch("/api/srs/queue");
+      if (!res.ok) return false;
+      const data = (await res.json()) as { cards?: StudyCard[] };
+      if (!Array.isArray(data.cards)) return false;
+      setCards(data.cards);
+      setDifficult(Object.fromEntries(data.cards.map((c) => [c.wordId, c.isDifficult])));
+      setIndex(0);
+      setFlipped(false);
+      return true;
     } catch {
       return false;
     }
@@ -105,13 +136,23 @@ export function Flashcard({ cards }: FlashcardProps) {
     busy.current = true;
     setSaving(g);
     setFailed(null);
-    const ok = await post("/api/srs/grade", { wordId: card.wordId, grade: g });
+    const status = await post("/api/srs/grade", { wordId: card.wordId, grade: g, requestId: requestIdFor(card.wordId) });
+    turn.current = status === 200 || status === 409 ? null : turn.current;
+    if (status === 409) {
+      const reloaded = await reloadQueue();
+      busy.current = false;
+      setSaving(null);
+      if (reloaded) setNotice("Karta boshqa joyda yangilangan. Joriy holat ko'rsatilmoqda.");
+      else setFailed(g);
+      return;
+    }
     busy.current = false;
     setSaving(null);
-    if (!ok) {
+    if (status !== 200) {
       setFailed(g);
       return;
     }
+    setNotice(null);
     setFlipped(false);
     setIndex((i) => i + 1);
   }
@@ -119,9 +160,12 @@ export function Flashcard({ cards }: FlashcardProps) {
   async function toggleDifficult() {
     if (togglePending) return;
     setTogglePending(true);
+    setToggleFailed(false);
     const value = !isDifficult;
-    if (await post("/api/srs/difficult", { wordId: card.wordId, value })) {
+    if ((await post("/api/srs/difficult", { wordId: card.wordId, value })) === 200) {
       setDifficult((d) => ({ ...d, [card.wordId]: value }));
+    } else {
+      setToggleFailed(true);
     }
     setTogglePending(false);
   }
@@ -181,6 +225,18 @@ export function Flashcard({ cards }: FlashcardProps) {
           </div>
         )}
       </div>
+
+      {notice && (
+        <p role="status" className="text-center text-sm text-ink-2">
+          {notice}
+        </p>
+      )}
+
+      {toggleFailed && (
+        <p role="alert" className="text-center text-sm font-bold text-fire-text">
+          Belgini saqlab bo&apos;lmadi. Qayta urinib ko&apos;ring.
+        </p>
+      )}
 
       {failed && (
         <div role="alert" className="flex flex-col items-center gap-2 text-center">

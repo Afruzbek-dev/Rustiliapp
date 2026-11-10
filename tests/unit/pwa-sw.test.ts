@@ -22,7 +22,7 @@ const res = (status = 200, type = "basic"): FakeRes => ({
   },
 });
 
-function setup(fetchImpl: (req: unknown) => Promise<FakeRes>) {
+function setup(fetchImpl: (req: unknown) => Promise<FakeRes>, opts: { putThrows?: boolean } = {}) {
   const handlers: Record<string, Handler> = {};
   const stores = new Map<string, Map<string, unknown>>();
   const open = (name: string) => {
@@ -31,7 +31,10 @@ function setup(fetchImpl: (req: unknown) => Promise<FakeRes>) {
     return {
       add: async (r: { url: string }) => void m.set(r.url, res()),
       match: async (r: { url: string }) => m.get(r.url),
-      put: vi.fn(async (r: { url: string }, v: unknown) => void m.set(r.url, v)),
+      put: vi.fn(async (r: { url: string }, v: unknown) => {
+        if (opts.putThrows) throw new Error("QuotaExceededError");
+        m.set(r.url, v);
+      }),
       keys: async () => [...m.keys()].map((url) => ({ url })),
       delete: async (r: { url: string }) => m.delete(r.url),
     };
@@ -180,6 +183,54 @@ describe("public/sw.js", () => {
     expect(out.result).toBe(stale);
     expect(t.fetchMock).toHaveBeenCalledTimes(1);
     expect(t.stores.get("po-russki-v2")?.get(`${A}/icons/icon-192.png`)).toBe(fresh);
+  });
+
+  it("icons: network ok but cache.put throws -> icon still returned", async () => {
+    const fresh = res(200);
+    const t = setup(async () => fresh, { putThrows: true });
+    const out = await t.fire({ url: `${A}/icons/icon-192.png` });
+    expect(out.result).toBe(fresh);
+  });
+
+  it("icons: cache hit + network failure -> cached icon, no unhandled rejection", async () => {
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    const stale = res(200);
+    const t = setup(async () => {
+      throw new TypeError("offline");
+    });
+    const cache = await t.caches.open("po-russki-v2");
+    await cache.put({ url: `${A}/icons/icon-192.png` }, stale);
+    const out = await t.fire({ url: `${A}/icons/icon-192.png` });
+    expect(out.result).toBe(stale);
+    await new Promise((r) => setTimeout(r, 10));
+    process.off("unhandledRejection", unhandled);
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it("icons: nothing cached + network failure -> network error, single fetch", async () => {
+    const t = setup(async () => {
+      throw new TypeError("offline");
+    });
+    await expect(t.fire({ url: `${A}/icons/icon-192.png` })).rejects.toThrow("offline");
+    expect(t.fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["206", res(206)],
+    ["opaque", res(200, "opaque")],
+    ["500", res(500)],
+  ])("icons: %s response is not cached", async (_n, r) => {
+    const t = setup(async () => r);
+    const out = await t.fire({ url: `${A}/icons/icon-192.png` });
+    expect(out.result).toBe(r);
+    expect(t.stores.get("po-russki-v2")?.size ?? 0).toBe(0);
+  });
+
+  it("icons: writes are trimmed to the 80-entry cap", async () => {
+    const t = setup(async () => res(200));
+    for (let i = 0; i < 85; i++) await t.fire({ url: `${A}/icons/i${i}.png` });
+    expect(t.stores.get("po-russki-v2")?.size).toBe(80);
   });
 
   it("deletes old po-russki-* caches on activate but keeps unrelated ones", async () => {

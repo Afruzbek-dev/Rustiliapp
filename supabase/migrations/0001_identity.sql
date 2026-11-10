@@ -140,10 +140,18 @@ language sql stable security definer set search_path = public as $$
     and (e.expires_at is null or e.expires_at > now())
 $$;
 
+-- Curated scope. Only callers with a curator/teacher/admin role get one, so a profile
+-- mistakenly set as curator_id while still a student gains no access.
+create function public.is_curator_role() returns boolean
+language sql stable security definer set search_path = public as $$
+  select coalesce(public.app_role() in ('curator', 'teacher', 'admin'), false)
+$$;
+
 -- Curator groups the caller curates.
 create function public.curated_group_ids() returns setof uuid
 language sql stable security definer set search_path = public as $$
-  select g.id from public.curator_groups g where g.curator_id = auth.uid()
+  select g.id from public.curator_groups g
+  where g.curator_id = auth.uid() and public.is_curator_role()
 $$;
 
 -- Students in the caller's curator groups.
@@ -152,13 +160,14 @@ language sql stable security definer set search_path = public as $$
   select distinct e.student_id
   from public.enrollments e
   join public.curator_groups g on g.id = e.curator_group_id
-  where g.curator_id = auth.uid()
+  where g.curator_id = auth.uid() and public.is_curator_role()
 $$;
 
 -- Cohorts / courses the caller curates a group in.
 create function public.curated_cohort_ids() returns setof uuid
 language sql stable security definer set search_path = public as $$
-  select distinct g.cohort_id from public.curator_groups g where g.curator_id = auth.uid()
+  select distinct g.cohort_id from public.curator_groups g
+  where g.curator_id = auth.uid() and public.is_curator_role()
 $$;
 
 create function public.curated_course_ids() returns setof uuid
@@ -166,7 +175,7 @@ language sql stable security definer set search_path = public as $$
   select distinct c.course_id
   from public.curator_groups g
   join public.cohorts c on c.id = g.cohort_id
-  where g.curator_id = auth.uid()
+  where g.curator_id = auth.uid() and public.is_curator_role()
 $$;
 
 -- Students (any enrollment status) of courses the caller teaches; all students for admins.
@@ -257,7 +266,7 @@ create policy cohorts_delete on public.cohorts
 -- curator_groups ------------------------------------------------------------
 create policy curator_groups_select on public.curator_groups
   for select to authenticated
-  using (curator_id = auth.uid() or public.teaches_cohort(cohort_id));
+  using (id in (select public.curated_group_ids()) or public.teaches_cohort(cohort_id));
 
 create policy curator_groups_insert on public.curator_groups
   for insert to authenticated

@@ -152,6 +152,18 @@ describe('0001 identity RLS', () => {
     ).rejects.toThrow(/row-level security/);
   });
 
+  it('a student wrongly set as a group’s curator_id gains no curator access', async () => {
+    const student = await createActiveStudent(a.cohort, a.group);
+    const group = await createGroup(a.cohort, student);
+    const peer = await createActiveStudent(a.cohort, group);
+    const profiles = await withUser(student, (q) => q('select id from public.profiles'));
+    expect(profiles.map((r) => r.id)).toEqual([student]);
+    expect(await withUser(student, (q) => q('select id from public.curator_groups'))).toEqual([]);
+    expect(
+      await withUser(student, (q) => q('select id from public.enrollments where student_id = $1', [peer])),
+    ).toEqual([]);
+  });
+
   it('a curator sees their own group and cohort, not other groups', async () => {
     const groups = await withUser(a.curator, (q) => q('select id from public.curator_groups'));
     expect(groups.map((r) => r.id)).toEqual([a.group]);

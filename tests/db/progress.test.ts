@@ -10,7 +10,7 @@ import {
   createProfile,
 } from './fixtures';
 
-const scores = (s: Partial<Record<'completeness' | 'pronunciation' | 'grammar' | 'fluency', unknown>>) =>
+const scores = (s: Record<string, unknown>) =>
   JSON.stringify({ completeness: 4, pronunciation: 4, grammar: 4, fluency: 4, ...s });
 
 describe('0003 progress RLS', () => {

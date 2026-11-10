@@ -14,14 +14,16 @@ afterAll(async () => {
   await pool.end();
 });
 
+// Rows are loosely typed on purpose: tests assert on them with expect().
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Row = Record<string, any>;
 export type Query = <R extends Row = Row>(text: string, params?: unknown[]) => Promise<R[]>;
 
 /** Run a statement as the superuser (autocommit). For fixtures and assertions only. */
-export const sql: Query = async (text, params) => {
-  const res = await pool.query(text, params as any[]);
-  return res.rows as any;
-};
+export async function sql<R extends Row = Row>(text: string, params?: unknown[]): Promise<R[]> {
+  const res = await pool.query<R>(text, params);
+  return res.rows;
+}
 
 async function inRole<T>(
   role: 'anon' | 'authenticated' | 'service_role',
@@ -38,9 +40,9 @@ async function inRole<T>(
               set_config('request.jwt.claims', $3, true)`,
       [uid ?? '', role, JSON.stringify(uid ? { sub: uid, role } : { role })],
     );
-    const q: Query = async (text, params) => {
-      const res = await client.query(text, params as any[]);
-      return res.rows as any;
+    const q: Query = async <R extends Row = Row>(text: string, params?: unknown[]) => {
+      const res = await client.query<R>(text, params);
+      return res.rows;
     };
     return await fn(q);
   } finally {

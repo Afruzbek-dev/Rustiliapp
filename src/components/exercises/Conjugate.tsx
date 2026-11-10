@@ -90,8 +90,10 @@ export function Conjugate({ exerciseId, payload, onDone }: ExerciseProps<Conjuga
         error={attempt.error}
         expectedText={expectedText}
         onContinue={() => {
+          const ok = attempt.result?.correct === true;
           attempt.reset();
-          onDone?.();
+          if (ok) onDone?.();
+          else setForms(pronouns.map(() => ""));
         }}
         onRetry={() => void attempt.retry()}
       />

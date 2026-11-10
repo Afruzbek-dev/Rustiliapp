@@ -4,15 +4,31 @@ import { ContinueCard } from "@/components/student/ContinueCard";
 import { DailyTasks } from "@/components/student/DailyTasks";
 import { ReviewDueCard } from "@/components/student/ReviewDueCard";
 import { StatTile } from "@/components/student/StatTile";
+import { StreakCelebration } from "@/components/student/StreakCelebration";
 import { WeekStrip } from "@/components/student/WeekStrip";
+import { createClient } from "@/lib/supabase/server";
 import { getDashboard } from "@/server/dashboard";
 import { requireStudent } from "@/server/guards";
+import { ensureStreakBonus } from "@/server/streak-bonus";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
   const { user } = await requireStudent();
+
+  // Streak-bonus check runs before the dashboard read so XP and streak shown include it.
+  // Failures are logged and never break the page.
+  let celebrate: { streak: number; day: string } | null = null;
+  let bonusStreak = 0;
+  try {
+    const b = await ensureStreakBonus(await createClient(), user.id);
+    bonusStreak = b.streak;
+    if (b.milestone !== null && b.awarded) celebrate = { streak: b.milestone, day: b.today };
+  } catch (err) {
+    console.error("streak bonus failed", err instanceof Error ? err.message : "unknown error");
+  }
   const d = await getDashboard(user.id);
+  const streak = Math.max(d.streak, bonusStreak);
 
   return (
     <main className="flex flex-col gap-4 p-4">
@@ -31,7 +47,7 @@ export default async function HomePage() {
       ) : (
         <>
           <section aria-label="Statistika" className="flex gap-2">
-            <StatTile icon={<Flame className="size-6" />} label="Streak" value={d.streak} tone="fire" />
+            <StatTile icon={<Flame className="size-6" />} label="Streak" value={streak} tone="fire" />
             <StatTile icon={<Zap className="size-6" />} label="XP" value={d.totalXp} tone="brand" />
             <StatTile
               icon={<Trophy className="size-6" />}
@@ -46,6 +62,7 @@ export default async function HomePage() {
           <ReviewDueCard count={d.dueCards} />
         </>
       )}
+      {celebrate && <StreakCelebration streak={celebrate.streak} day={celebrate.day} />}
     </main>
   );
 }

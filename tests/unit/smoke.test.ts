@@ -4,6 +4,16 @@ import { describe, expect, it } from "vitest";
 
 const css = readFileSync(join(process.cwd(), "src/app/globals.css"), "utf8");
 
+/** Body of the first `:root { ... }` block (excludes `@theme inline`). */
+function rootBlock(source: string): string {
+  const start = source.indexOf(":root");
+  const open = source.indexOf("{", start);
+  const close = source.indexOf("}", open);
+  if (start < 0 || open < 0 || close < 0) throw new Error(":root block not found");
+  return source.slice(open + 1, close);
+}
+const root = rootBlock(css);
+
 describe("design tokens", () => {
   it.each([
     ["--bg", "#FAF7EC"],
@@ -33,6 +43,6 @@ describe("design tokens", () => {
     ["--radius-lg", "20px"],
     ["--radius-xl", "24px"],
   ])("defines %s: %s", (name, value) => {
-    expect(css).toContain(`${name}: ${value};`);
+    expect(root).toContain(`${name}: ${value};`);
   });
 });

@@ -8,6 +8,13 @@ export interface IconButtonProps
 }
 
 export function IconButton({ icon, type = "button", ...rest }: IconButtonProps) {
+  const label = rest["aria-label"];
+  if (typeof label !== "string" || label.trim() === "") {
+    // A silent icon-only button is an accessibility bug: fail loudly in development.
+    if (process.env.NODE_ENV !== "production") {
+      throw new Error("IconButton requires a non-empty aria-label");
+    }
+  }
   return (
     <button
       type={type}

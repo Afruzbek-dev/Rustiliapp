@@ -17,8 +17,9 @@ export interface ProgressBarProps {
 }
 
 export function ProgressBar({ value, max = 100, color = "brand", label }: ProgressBarProps) {
-  const safeMax = max > 0 ? max : 100;
-  const clamped = Math.min(Math.max(value, 0), safeMax);
+  const safeMax = Number.isFinite(max) && max > 0 ? max : 100;
+  const safeValue = Number.isFinite(value) ? value : 0;
+  const clamped = Math.min(Math.max(safeValue, 0), safeMax);
   const pct = (clamped / safeMax) * 100;
   return (
     <div
@@ -26,7 +27,7 @@ export function ProgressBar({ value, max = 100, color = "brand", label }: Progre
       aria-valuenow={clamped}
       aria-valuemin={0}
       aria-valuemax={safeMax}
-      aria-label={label}
+      aria-label={label?.trim() ? label : "Jarayon"}
       className="h-3 w-full overflow-hidden rounded-full bg-surface-2"
     >
       <div

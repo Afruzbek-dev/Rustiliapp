@@ -59,6 +59,56 @@ export async function createCourseWorld() {
   return { teacher, course, cohort, curator, group };
 }
 
+/** module → lesson → two parts for `course`. */
+export async function createLesson(course: string) {
+  const [m] = await sql<{ id: string }>(
+    `insert into public.modules (course_id, position, title)
+     values ($1, coalesce((select max(position) from public.modules where course_id = $1), 0) + 1, 'Modul')
+     returning id`,
+    [course],
+  );
+  const [l] = await sql<{ id: string }>(
+    `insert into public.lessons (module_id, position, title) values ($1, 1, 'Dars 1') returning id`,
+    [m.id],
+  );
+  const [p1] = await sql<{ id: string }>(
+    `insert into public.lesson_parts (lesson_id, position, kind, title)
+     values ($1, 1, 'grammar', 'Grammatika') returning id`,
+    [l.id],
+  );
+  const [p2] = await sql<{ id: string }>(
+    `insert into public.lesson_parts (lesson_id, position, kind, title)
+     values ($1, 2, 'conversation', 'Razgovor') returning id`,
+    [l.id],
+  );
+  return { module: m.id, lesson: l.id, part1: p1.id, part2: p2.id };
+}
+
+export async function createBlock(part: string, position: number, published: boolean, type = 'exercise') {
+  const [row] = await sql<{ id: string }>(
+    `insert into public.blocks (lesson_part_id, position, type, published) values ($1, $2, $3, $4) returning id`,
+    [part, position, type, published],
+  );
+  return row.id;
+}
+
+/** An exercise in `block` (course_id is filled from the block) with a hidden answer key. */
+export async function createExercise(
+  block: string,
+  opts: { type?: string; answer?: unknown; checkMode?: 'auto' | 'review' } = {},
+): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `insert into public.exercises (block_id, type, prompt, payload, check_mode)
+     values ($1, $2, 'Prompt', '{"items":["тетрадь"]}', $3) returning id`,
+    [block, opts.type ?? 'classify', opts.checkMode ?? 'auto'],
+  );
+  await sql('insert into public.exercise_keys (exercise_id, answer) values ($1, $2)', [
+    row.id,
+    JSON.stringify(opts.answer ?? { тетрадь: 'f' }),
+  ]);
+  return row.id;
+}
+
 /** An active student enrolled in `cohort` (optionally in `groupId`). */
 export async function createActiveStudent(cohort: string, groupId: string | null = null, fullName = 'Madina Rahimova') {
   const student = await createProfile('student', fullName);

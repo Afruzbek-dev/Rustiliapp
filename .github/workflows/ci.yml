@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # package.json has no packageManager field, so pnpm falls back to 10.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: npx eslint src tests vitest.config.ts vitest.db.config.ts
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      # DB tests: scripts/db-test.sh starts its own throwaway Postgres 16 cluster
+      # (initdb + auth shim + migrations) as the current non-root runner user, so no
+      # `services: postgres` container is needed. This is the least invasive option:
+      # CI runs exactly what developers run locally. We only make sure the
+      # PostgreSQL 16 server binaries exist (usually preinstalled on ubuntu-latest).
+      - name: Ensure PostgreSQL 16 server binaries
+        run: |
+          if [ ! -x /usr/lib/postgresql/16/bin/initdb ]; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-16
+            sudo systemctl stop postgresql || true
+          fi
+          echo "PG_BIN=/usr/lib/postgresql/16/bin" >> "$GITHUB_ENV"
+
+      - name: DB tests
+        run: pnpm test:db
+
+      - name: Build
+        run: pnpm build
+        env:
+          # Placeholders only: the build must not need real credentials.
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key
+          SUPABASE_SERVICE_ROLE_KEY: placeholder-service-role-key
+          DATABASE_URL: postgres://placeholder:placeholder@localhost:5432/placeholder
+          TELEGRAM_BOT_TOKEN: "0:placeholder"
+          TELEGRAM_WEBHOOK_SECRET: placeholder-secret
+          TELEGRAM_BOT_USERNAME: placeholder_bot
+          TELEGRAM_ARCHIVE_CHAT_ID: "-1000000000000"
+          TELEGRAM_STAFF_CHAT_ID: "-1000000000001"
+          APP_URL: http://localhost:3000
+          E2E_SECRET: placeholder-e2e-secret

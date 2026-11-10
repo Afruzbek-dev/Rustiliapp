@@ -7,13 +7,14 @@ import { deflateSync } from "node:zlib";
 const BG = [0xff, 0xd6, 0x0a];
 const FG = [0x1a, 0x1a, 0x17];
 
-// "Ж" in a unit box (0..1): a vertical stem and four arms meeting at its middle.
+// "Ж" in a unit box (0..1): full-height stem; the four diagonals all end exactly at the stem's midpoint
+// (0.5, 0.5); arms span the full glyph height and width like a printed Ж.
 const SEGMENTS = [
   [[0.5, 0.0], [0.5, 1.0]],
-  [[0.5, 0.5], [0.1, 0.0]],
-  [[0.5, 0.5], [0.1, 1.0]],
-  [[0.5, 0.5], [0.9, 0.0]],
-  [[0.5, 0.5], [0.9, 1.0]],
+  [[0.5, 0.5], [0.06, 0.0]],
+  [[0.5, 0.5], [0.06, 1.0]],
+  [[0.5, 0.5], [0.94, 0.0]],
+  [[0.5, 0.5], [0.94, 1.0]],
 ];
 
 function distToSegment(px, py, [[ax, ay], [bx, by]]) {
@@ -28,7 +29,7 @@ function render(size, glyphScale) {
   const SS = 3; // supersampling
   const box = size * glyphScale;
   const off = (size - box) / 2;
-  const half = 0.07; // stroke half-width in glyph units
+  const half = 0.075; // stroke half-width in glyph units
   const stride = size * 3 + 1;
   const raw = Buffer.alloc(stride * size);
   for (let y = 0; y < size; y++) {

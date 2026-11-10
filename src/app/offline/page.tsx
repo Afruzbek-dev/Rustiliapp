@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { RetryButton } from "@/components/pwa/RetryButton";
 
+// sw-cache-version: v2 (must match CACHE_VERSION in public/sw.js; bump both when this page changes)
 export const metadata: Metadata = { title: "Internet yo'q" };
 
 export default function OfflinePage() {

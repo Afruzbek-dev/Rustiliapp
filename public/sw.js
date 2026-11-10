@@ -1,11 +1,17 @@
-/* Hand-written service worker (no build dependency; Serwist/webpack plugin is not needed for this scope).
+/* Hand-written service worker (no build dependency).
  * - Precaches the /offline fallback page.
- * - Cache-first for immutable /_next/static assets, icons, images and fonts.
- * - Navigations go to the network only; on failure the cached /offline page is served.
- * - NEVER caches /api/** or any (authenticated) HTML other than /offline. */
-const VERSION = "v1";
-const STATIC_CACHE = `po-russki-static-${VERSION}`;
+ * - Cache-first ONLY for immutable, hashed /_next/static assets (next/font files live there too).
+ * - Stale-while-revalidate for unhashed /icons/*.
+ * - Navigations go to the network only; /offline is served only when the network request fails.
+ * - NEVER caches /api/**, /_next/image, generic images or any HTML other than /offline.
+ */
+
+// Bump on every change to /offline (src/app/offline/page.tsx) or to this file.
+const CACHE_VERSION = "v2";
+const CACHE_PREFIX = "po-russki-";
+const STATIC_CACHE = CACHE_PREFIX + CACHE_VERSION;
 const OFFLINE_URL = "/offline";
+const MAX_RUNTIME_ENTRIES = 80;
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -21,17 +27,30 @@ self.addEventListener("activate", (event) => {
     caches
       .keys()
       .then((keys) =>
-        Promise.all(keys.filter((k) => k.startsWith("po-russki-") && k !== STATIC_CACHE).map((k) => caches.delete(k))),
+        Promise.all(keys.filter((k) => k.startsWith(CACHE_PREFIX) && k !== STATIC_CACHE).map((k) => caches.delete(k))),
       )
       .then(() => self.clients.claim()),
   );
 });
 
-function isCacheableAsset(url, request) {
-  if (url.pathname.startsWith("/api/")) return false;
-  if (url.pathname.startsWith("/_next/static/")) return true;
-  if (url.pathname.startsWith("/icons/")) return true;
-  return request.destination === "image" || request.destination === "font";
+function isCacheable(res) {
+  return res.status === 200 && res.type === "basic";
+}
+
+/** Keeps the runtime cache bounded; the offline page is never evicted. */
+async function trim(cache) {
+  const keys = (await cache.keys()).filter((r) => new URL(r.url).pathname !== OFFLINE_URL);
+  for (let i = 0; i < keys.length - MAX_RUNTIME_ENTRIES; i++) await cache.delete(keys[i]);
+}
+
+function store(event, cache, request, res) {
+  if (!isCacheable(res)) return;
+  event.waitUntil(
+    cache
+      .put(request, res.clone())
+      .then(() => trim(cache))
+      .catch(() => {}),
+  );
 }
 
 self.addEventListener("fetch", (event) => {
@@ -45,15 +64,35 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (url.origin !== self.location.origin) return;
-  if (!isCacheableAsset(url, request)) return;
+  if (url.pathname.startsWith("/api/")) return;
 
-  event.respondWith(
-    caches.open(STATIC_CACHE).then(async (cache) => {
-      const hit = await cache.match(request);
-      if (hit) return hit;
-      const res = await fetch(request);
-      if (res.ok) cache.put(request, res.clone());
-      return res;
-    }),
-  );
+  if (url.pathname.startsWith("/_next/static/")) {
+    event.respondWith(
+      caches.open(STATIC_CACHE).then(async (cache) => {
+        const hit = await cache.match(request);
+        if (hit) return hit;
+        const res = await fetch(request);
+        store(event, cache, request, res);
+        return res;
+      }),
+    );
+    return;
+  }
+
+  if (url.pathname.startsWith("/icons/")) {
+    event.respondWith(
+      caches.open(STATIC_CACHE).then(async (cache) => {
+        const hit = await cache.match(request);
+        const refresh = fetch(request).then((res) => {
+          store(event, cache, request, res);
+          return res;
+        });
+        if (hit) {
+          refresh.catch(() => {});
+          return hit;
+        }
+        return refresh;
+      }),
+    );
+  }
 });

@@ -9,6 +9,12 @@ describe('normalize', () => {
     expect(normalize('Он   идёт!')).toBe('он идет')
     expect(normalize('что?')).toBe('что')
   })
+  it('handles decomposed ё and й (NFC first)', () => {
+    expect(normalize('Он иде\u0308т')).toBe('он идет')
+    expect(normalize('мои\u0306')).toBe(normalize('мой'))
+    expect(normalize('мои\u0306')).toBe('мой')
+    expect(normalize('ее\u0308')).toBe('ее')
+  })
   it('removes stress mark and handles empty', () => {
     expect(normalize('работает́')).toBe('работает')
     expect(normalize('')).toBe('')

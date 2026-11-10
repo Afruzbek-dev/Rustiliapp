@@ -7,6 +7,8 @@ import {
   handleSrsDifficult,
   handleSrsGrade,
   tashkentDayStart,
+  getStudyCounts,
+  type ApplyResult,
   type CardRow,
   type QueueRow,
   type SrsQueueDb,
@@ -27,12 +29,15 @@ const row = (n: number, over: Partial<QueueRow> = {}): QueueRow => ({
   isDifficult: false,
   word,
   ...over,
+  lastRequestId: over.lastRequestId ?? null,
 });
 
 function fakeQueueDb(opts: { due: QueueRow[]; fresh: QueueRow[]; introducedToday: number }) {
   const calls = { since: "" as string, newLimit: -1 };
   const db: SrsQueueDb = {
-    dueCards: async () => opts.due,
+    dueCards: async (_s, _n, limit) => opts.due.slice(0, limit),
+    countDue: async () => opts.due.length,
+    countNew: async () => opts.fresh.length,
     newCards: async (_s, limit) => {
       calls.newLimit = limit;
       return opts.fresh.slice(0, limit);
@@ -108,7 +113,7 @@ describe("getStudyQueueWith", () => {
   });
 });
 
-/** In-memory store keyed by student+word; mirrors RLS (own cards only) and srs_apply_grade. */
+/** In-memory store keyed by student+word; mirrors RLS (own cards only) and the srs_apply_grade CAS. */
 function fakeStore(cards: Record<string, CardRow & { first: boolean }>, role = "student") {
   const bump = vi.fn(async () => undefined);
   const store: SrsStore = {
@@ -117,12 +122,14 @@ function fakeStore(cards: Record<string, CardRow & { first: boolean }>, role = "
       const c = cards[`${s}:${w}`];
       return c ? { ...c } : null;
     },
-    applyGrade: async (s, w, next) => {
+    applyGrade: async (s, w, next, expect, requestId): Promise<ApplyResult> => {
       const c = cards[`${s}:${w}`];
-      if (!c) return null;
+      if (!c) return "missing";
+      if (requestId && c.lastRequestId === requestId) return "replay";
+      if (c.reps !== expect.reps || c.lapses !== expect.lapses || c.dueAt !== expect.dueAt) return "conflict";
       const wasNew = !c.first;
-      Object.assign(c, { ...next, first: true });
-      return wasNew;
+      Object.assign(c, { ...next, first: true, lastRequestId: requestId });
+      return wasNew ? "first" : "applied";
     },
     bumpWordsTask: bump,
     setDifficult: async (s, w, v) => {
@@ -142,6 +149,7 @@ const card = (n: number): CardRow & { first: boolean } => ({
   lapses: 0,
   dueAt: NOW.toISOString(),
   isDifficult: false,
+  lastRequestId: null,
   first: false,
 });
 
@@ -203,6 +211,40 @@ describe("handleSrsGrade", () => {
     expect(bump).toHaveBeenCalledWith("s1");
   });
 
+  it("an exact retry with the same requestId advances the card once and returns the stored state", async () => {
+    const R = "11111111-1111-4111-8111-111111111111";
+    const cards = { [`s1:${W(1)}`]: card(1) };
+    const { store, bump } = fakeStore(cards);
+    const body = { wordId: W(1), grade: "good", requestId: R };
+    const a = await handleSrsGrade({ store }, { userId: "s1", body, now: NOW });
+    const b = await handleSrsGrade({ store }, { userId: "s1", body, now: new Date(NOW.getTime() + 5000) });
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect((b.json as { card: CardRow }).card).toEqual((a.json as { card: CardRow }).card);
+    expect(cards[`s1:${W(1)}`]).toMatchObject({ reps: 1, intervalDays: 1 });
+    expect(bump).toHaveBeenCalledTimes(1);
+  });
+
+  it("a stale write (card moved on since it was read) is a 409 carrying the current card", async () => {
+    const cards = { [`s1:${W(1)}`]: card(1) };
+    const { store } = fakeStore(cards);
+    // another tab grades between our read and our write
+    const realGet = store.getCard.bind(store);
+    let first = true;
+    store.getCard = async (s, w) => {
+      const c = await realGet(s, w);
+      if (first) {
+        first = false;
+        await handleSrsGrade({ store: { ...store, getCard: realGet } }, { userId: "s1", body: { wordId: W(1), grade: "good" }, now: NOW });
+      }
+      return c;
+    };
+    const r = await handleSrsGrade({ store }, { userId: "s1", body: { wordId: W(1), grade: "good" }, now: NOW });
+    expect(r.status).toBe(409);
+    expect(r.json).toMatchObject({ error: "conflict", card: { wordId: W(1), reps: 1 } });
+    expect(cards[`s1:${W(1)}`].reps).toBe(1); // not advanced twice
+  });
+
   it("a failing bump does not fail the stored grade", async () => {
     const { store, bump } = fakeStore({ [`s1:${W(1)}`]: card(1) });
     bump.mockRejectedValueOnce(new Error("boom"));
@@ -211,6 +253,34 @@ describe("handleSrsGrade", () => {
     expect(r.status).toBe(200);
     expect(JSON.stringify(spy.mock.calls)).not.toContain("boom");
     spy.mockRestore();
+  });
+});
+
+describe("getStudyCounts", () => {
+  it("equals what the queue serves (home number == /words)", async () => {
+    for (const introducedToday of [0, 4, 10]) {
+      const o = {
+        due: [row(1, { reps: 1 }), row(2, { reps: 1 })],
+        fresh: Array.from({ length: 30 }, (_, i) => row(100 + i)),
+        introducedToday,
+      };
+      const { db } = fakeQueueDb(o);
+      const q = await getStudyQueueWith(db, "s", NOW);
+      const c = await getStudyCounts(db, "s", NOW);
+      expect(c.total).toBe(q.cards.length);
+      expect(c).toEqual({ due: 2, new: Math.max(0, 10 - introducedToday), total: 2 + Math.max(0, 10 - introducedToday) });
+    }
+    const { db } = fakeQueueDb({ due: [], fresh: [row(1), row(2)], introducedToday: 0 });
+    expect((await getStudyCounts(db, "s", NOW)).total).toBe(2);
+  });
+
+  it("dueCount is the real due total even beyond the served rows", async () => {
+    const due = Array.from({ length: 250 }, (_, i) => row(i + 1, { reps: 1 }));
+    const { db } = fakeQueueDb({ due, fresh: [], introducedToday: 0 });
+    const q = await getStudyQueueWith(db, "s", NOW);
+    expect(q.dueCount).toBe(250);
+    expect(q.cards).toHaveLength(200);
+    expect((await getStudyCounts(db, "s", NOW)).total).toBe(200);
   });
 });
 

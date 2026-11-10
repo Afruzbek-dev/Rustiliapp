@@ -72,10 +72,9 @@ describe("Flashcard", () => {
     render(<Flashcard cards={[mk(1), mk(2, { uz: "kot" })]} />);
     await user.click(screen.getByRole("button", { name: /до́м/ }));
     await user.click(screen.getByRole("button", { name: "Bildim 4 kun" }));
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/srs/grade",
-      expect.objectContaining({ method: "POST", body: JSON.stringify({ wordId: "w1", grade: "good" }) }),
-    );
+    expect(fetchMock).toHaveBeenCalledWith("/api/srs/grade", expect.objectContaining({ method: "POST" }));
+    const sent = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(sent).toMatchObject({ wordId: "w1", grade: "good" });
     // not optimistic: still on card 1
     expect(screen.getByText("1 / 2")).toBeInTheDocument();
     resolve(okResponse());
@@ -132,5 +131,54 @@ describe("Flashcard", () => {
     await user.click(screen.getByRole("button", { name: /до́м/ }));
     await user.click(screen.getByRole("button", { name: "Bildim 4 kun" }));
     expect(await screen.findByText("Takrorlash tugadi")).toBeInTheDocument();
+  });
+
+  it("reuses the same requestId when retrying a failed grade, and a new one for the next card", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("{}", { status: 500 }))
+      .mockResolvedValue(okResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    render(<Flashcard cards={[mk(1), mk(2)]} />);
+    await user.click(screen.getByRole("button", { name: /до́м/ }));
+    await user.click(screen.getByRole("button", { name: "Bildim 4 kun" }));
+    await user.click(await screen.findByRole("button", { name: "Qayta urinish" }));
+    await waitFor(() => expect(screen.getByText("2 / 2")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /до́м/ }));
+    await user.click(screen.getByRole("button", { name: "Bildim 4 kun" }));
+    const ids = fetchMock.mock.calls.map((c) => JSON.parse((c[1] as RequestInit).body as string).requestId);
+    expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ids[1]).toBe(ids[0]);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+
+  it("on 409 reloads the queue and shows the current card without advancing or an error", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (url: string) =>
+      url === "/api/srs/queue"
+        ? new Response(JSON.stringify({ cards: [mk(1, { uz: "yangi holat" })] }), { status: 200 })
+        : new Response(JSON.stringify({ error: "conflict" }), { status: 409 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<Flashcard cards={[mk(1), mk(2)]} />);
+    await user.click(screen.getByRole("button", { name: /до́м/ }));
+    await user.click(screen.getByRole("button", { name: "Bildim 4 kun" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Karta boshqa joyda yangilangan");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("1 / 1")).toBeInTheDocument();
+    expect(screen.queryByText("uy")).toBeNull(); // unflipped
+    await user.click(screen.getByRole("button", { name: /до́м/ }));
+    expect(screen.getByText("yangi holat")).toBeInTheDocument();
+  });
+
+  it("shows an error when the difficult toggle fails and does not flip the state", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 500 })));
+    render(<Flashcard cards={[mk(1)]} />);
+    const toggle = screen.getByRole("button", { name: /Qiyin so'z/ });
+    await user.click(toggle);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Belgini saqlab bo'lmadi");
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
   });
 });

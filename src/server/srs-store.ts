@@ -8,7 +8,7 @@ type Row = Record<string, unknown>;
 
 const WORD_COLS =
   "words!inner(ru, stress, uz, gender, example_ru, example_uz, audio_path, lesson_words(lessons(title)))";
-const CARD_COLS = "word_id, interval_days, ease, due_at, reps, lapses, is_difficult";
+const CARD_COLS = "word_id, interval_days, ease, due_at, reps, lapses, is_difficult, last_request_id";
 
 const fail = (what: string, error: { message: string } | null) => {
   if (error) throw new Error(`srs: ${what}: ${error.message}`);
@@ -24,6 +24,7 @@ function cardOf(r: Row): CardRow {
     lapses: Number(r.lapses),
     dueAt: new Date(r.due_at as string).toISOString(),
     isDifficult: r.is_difficult === true,
+    lastRequestId: (r.last_request_id as string | null) ?? null,
   };
 }
 
@@ -63,6 +64,25 @@ export function supabaseQueueDb(sb: SupabaseClient): SrsQueueDb {
         .limit(limit);
       fail("due cards", error);
       return ((data ?? []) as unknown as Row[]).map(queueRowOf);
+    },
+    async countDue(studentId, nowIso) {
+      const { count, error } = await sb
+        .from("srs_cards")
+        .select("word_id", { count: "exact", head: true })
+        .eq("student_id", studentId)
+        .not("first_studied_at", "is", null)
+        .lte("due_at", nowIso);
+      fail("due cards count", error);
+      return count ?? 0;
+    },
+    async countNew(studentId) {
+      const { count, error } = await sb
+        .from("srs_cards")
+        .select("word_id", { count: "exact", head: true })
+        .eq("student_id", studentId)
+        .is("first_studied_at", null);
+      fail("new cards count", error);
+      return count ?? 0;
     },
     async newCards(studentId, limit) {
       const { data, error } = await sb
@@ -111,7 +131,7 @@ export function createSupabaseSrsStore(user: SupabaseClient, service: SupabaseCl
       fail("card", error);
       return data ? cardOf(data as unknown as Row) : null;
     },
-    async applyGrade(studentId, wordId, next) {
+    async applyGrade(studentId, wordId, next, expect, requestId) {
       const { data, error } = await service.rpc("srs_apply_grade", {
         p_student: studentId,
         p_word: wordId,
@@ -120,9 +140,16 @@ export function createSupabaseSrsStore(user: SupabaseClient, service: SupabaseCl
         p_due: next.dueAt,
         p_reps: next.reps,
         p_lapses: next.lapses,
+        p_expect_reps: expect.reps,
+        p_expect_lapses: expect.lapses,
+        p_expect_due: expect.dueAt,
+        p_request: requestId,
       });
       fail("apply grade", error);
-      return data === null || data === undefined ? null : data === true;
+      if (data === "first" || data === "applied" || data === "replay" || data === "conflict" || data === "missing") {
+        return data;
+      }
+      throw new Error("srs: apply grade: unexpected result");
     },
     bumpWordsTask: (studentId) => bumpDailyTask(service, studentId, "words", 1),
     async setDifficult(studentId, wordId, value) {

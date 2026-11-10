@@ -1,0 +1,37 @@
+name: Supabase keepalive
+
+# Supabase free projects pause after a week of inactivity; one light query a day prevents that.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping Supabase REST
+        shell: bash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::Repository secrets SUPABASE_URL and SUPABASE_ANON_KEY must both be set (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          status=$(curl -sS -o body.json -w '%{http_code}' --max-time 30 \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            "${SUPABASE_URL%/}/rest/v1/modules?select=id&limit=1")
+          echo "Supabase REST responded with HTTP $status"
+          # 2xx is success. A PostgREST "permission denied" (SQLSTATE 42501) also proves the
+          # database executed the query (anon has no grant on this table), so accept it too.
+          if [[ "$status" == 2* ]] || grep -q '"42501"' body.json; then
+            exit 0
+          fi
+          echo "::error::Keepalive query failed (HTTP $status). Check SUPABASE_URL / SUPABASE_ANON_KEY."
+          exit 1

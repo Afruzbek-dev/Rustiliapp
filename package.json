@@ -11,7 +11,8 @@
     "test": "vitest run --project unit",
     "test:db": "bash scripts/db-test.sh",
     "test:e2e": "playwright test --trace off",
-    "content:import": "tsx scripts/content-import.ts"
+    "content:import": "tsx scripts/content-import.ts",
+    "telegram:set-webhook": "tsx scripts/set-webhook.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

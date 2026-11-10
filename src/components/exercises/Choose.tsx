@@ -8,7 +8,7 @@ import { optionClass, type ExerciseProps, type OptionState } from "./styles";
 import { useAttempt } from "./useAttempt";
 import { WordCard } from "./WordCard";
 
-export function Choose({ exerciseId, payload, onDone }: ExerciseProps<ChoosePayload>) {
+export function Choose({ exerciseId, payload, onDone, onExit }: ExerciseProps<ChoosePayload>) {
   const [index, setIndex] = useState(0);
   const [picked, setPicked] = useState<number | null>(null);
   const attempt = useAttempt(exerciseId);
@@ -61,6 +61,7 @@ export function Choose({ exerciseId, payload, onDone }: ExerciseProps<ChoosePayl
         ))}
       </div>
       <FeedbackSheet
+        onExit={onExit}
         status={attempt.status}
         result={attempt.result}
         error={attempt.error}

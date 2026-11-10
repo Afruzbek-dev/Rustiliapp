@@ -9,7 +9,7 @@ import type { ExerciseProps } from "./styles";
 import { useAttempt } from "./useAttempt";
 import { WordCard } from "./WordCard";
 
-export function Conjugate({ exerciseId, payload, onDone }: ExerciseProps<ConjugatePayload>) {
+export function Conjugate({ exerciseId, payload, onDone, onExit }: ExerciseProps<ConjugatePayload>) {
   const pronouns = payload.pronouns.length > 0 ? payload.pronouns : [...PRONOUNS];
   const [forms, setForms] = useState<string[]>(() => pronouns.map(() => ""));
   const attempt = useAttempt(exerciseId);
@@ -85,6 +85,7 @@ export function Conjugate({ exerciseId, payload, onDone }: ExerciseProps<Conjuga
         )}
       </form>
       <FeedbackSheet
+        onExit={onExit}
         status={attempt.status}
         result={attempt.result}
         error={attempt.error}

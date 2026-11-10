@@ -100,8 +100,15 @@ export function xpForCorrect(prior: { total: number }): number {
   return prior.total === 0 ? EXERCISE_FIRST : EXERCISE_RETRY;
 }
 
+/** Optional side effects of submitAttempt; failures are logged and never fail the attempt. */
+export interface AttemptDeps {
+  store: AttemptStore;
+  /** Called after award_xp for a correct attempt on an exercise that sits in a lesson part. */
+  onCorrect?: (info: { studentId: string; partId: string; exerciseId: string }) => Promise<void>;
+}
+
 export async function submitAttempt(
-  deps: { store: AttemptStore },
+  deps: AttemptDeps,
   input: { studentId: string; exerciseId: string; answer: unknown },
 ): Promise<AttemptResult> {
   const { store } = deps;
@@ -147,6 +154,14 @@ export async function submitAttempt(
   if (result.correct) {
     const amount = xpForCorrect(prior);
     if (await store.awardXp(studentId, amount, "exercise_correct", ref)) xpAwarded += amount;
+    if (exercise.partId && deps.onCorrect) {
+      try {
+        // Daily-task glue (grammar task). Best effort: never fails the attempt, logs no PII.
+        await deps.onCorrect({ studentId, partId: exercise.partId, exerciseId });
+      } catch (e) {
+        console.error("attempts: onCorrect hook failed", e instanceof Error ? e.name : "unknown");
+      }
+    }
     if (exercise.partId) {
       const part = await completePart(store, studentId, exercise.partId);
       xpAwarded += part.xpAwarded;
@@ -166,7 +181,7 @@ export async function submitAttempt(
 
 /** Transport-independent request handler; the route is a thin adapter around it. */
 export async function handleAttemptRequest(
-  deps: { store: AttemptStore },
+  deps: AttemptDeps,
   req: { userId: string | null; body: unknown },
 ): Promise<{ status: number; json: Record<string, unknown> }> {
   if (!req.userId) return { status: 401, json: { error: "unauthenticated" } };

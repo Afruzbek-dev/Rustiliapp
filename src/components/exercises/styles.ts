@@ -20,4 +20,6 @@ export type ExerciseProps<P> = {
   payload: P;
   /** Called after the student passed the last step. */
   onDone?: () => void;
+  /** Leave the exercise; offered as an "Orqaga" button when the error is not retryable (403/404/400). */
+  onExit?: () => void;
 };

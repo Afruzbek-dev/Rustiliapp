@@ -4,7 +4,7 @@ import { publicEnv, serverEnv } from "@/lib/env";
 const validServer = {
   SUPABASE_SERVICE_ROLE_KEY: "svc",
   TELEGRAM_BOT_TOKEN: "tok",
-  TELEGRAM_WEBHOOK_SECRET: "sec",
+  TELEGRAM_WEBHOOK_SECRET: "s".repeat(32),
   TELEGRAM_BOT_USERNAME: "bot",
   TELEGRAM_ARCHIVE_CHAT_ID: "-1",
   TELEGRAM_STAFF_CHAT_ID: "-2",

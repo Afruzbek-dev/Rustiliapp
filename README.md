@@ -47,6 +47,9 @@ CI (`.github/workflows/ci.yml`) runs lint, typecheck, unit tests, DB tests and t
 2. Apply every file in `supabase/migrations/` in filename order (`0001_...sql`, `0002_...sql`, ...), either by pasting
    each into the SQL editor or with `psql "$DATABASE_URL" -1 -f supabase/migrations/NNNN_name.sql`.
 3. Copy the URL, anon key and service-role key into the environment variables above.
+4. **Security (required):** in Authentication > Providers > Email turn **off** "Allow new users to sign up". Users are
+   created only by the bot with the service role; with public signup enabled an attacker could pre-register
+   `tg_<telegram_id>@users.internal` for a victim before their first login.
 
 ## Telegram bot and chats
 

@@ -5,7 +5,7 @@ vi.mock("@/lib/telegram/bot", () => ({ getWebhookHandler: () => handler }));
 
 import { POST } from "@/app/api/telegram/webhook/route";
 
-const SECRET = "s3cret-value";
+const SECRET = "s3cret-value-0123456789-abcdefghij";
 
 function req(headers: Record<string, string> = {}) {
   return new Request("http://localhost/api/telegram/webhook", {

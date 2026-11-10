@@ -5,6 +5,7 @@ import { serverEnv } from "@/lib/env";
 import { createServiceClient } from "@/lib/supabase/service";
 import type { Db } from "@/lib/telegram/api";
 import { MSG, registerLogin } from "@/lib/telegram/handlers/login";
+import { logBotError } from "@/lib/telegram/log";
 
 /** Builds a bot with all handlers; `getDb` and `botInfo` are injectable for tests. */
 export function createBot(token: string, getDb: () => Db = createServiceClient, botInfo?: UserFromGetMe) {
@@ -14,10 +15,10 @@ export function createBot(token: string, getDb: () => Db = createServiceClient, 
     try {
       await next();
     } catch (error) {
-      // Log only the error name: messages and updates may contain phone numbers.
-      console.error("telegram handler failed:", error instanceof Error ? error.name : "unknown");
+      logBotError(error, ctx.update.update_id);
       try {
-        await ctx.reply(MSG.error);
+        if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: MSG.error, show_alert: true });
+        else await ctx.reply(MSG.error);
       } catch {
         // ignore: answering 200 matters more than the notice
       }
@@ -28,6 +29,7 @@ export function createBot(token: string, getDb: () => Db = createServiceClient, 
 }
 
 let instance: Bot | undefined;
+let handler: ((req: Request) => Promise<Response>) | undefined;
 
 /** Lazy singleton: nothing is read from env at import time (so `next build` needs no secrets). */
 export function getBot(): Bot {
@@ -35,5 +37,5 @@ export function getBot(): Bot {
 }
 
 export function getWebhookHandler() {
-  return webhookCallback(getBot(), "std/http");
+  return (handler ??= webhookCallback(getBot(), "std/http"));
 }

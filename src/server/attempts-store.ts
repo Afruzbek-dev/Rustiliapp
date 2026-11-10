@@ -133,6 +133,11 @@ export function createSupabaseAttemptStore(user: SupabaseClient, service: Supaba
       fail("ensurePartStarted", error);
     },
 
+    async addLessonCards(studentId, partId) {
+      const { error } = await service.rpc("srs_add_lesson_words", { p_student: studentId, p_part: partId });
+      fail("addLessonCards", error);
+    },
+
     async markPartCompleted(studentId, partId) {
       const { data, error } = await service
         .from("part_progress")

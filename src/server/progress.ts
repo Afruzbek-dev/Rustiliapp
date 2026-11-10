@@ -28,6 +28,11 @@ export interface ProgressStore {
   getSubmittedExerciseIds(studentId: string, exerciseIds: string[]): Promise<string[]>;
   /** Insert part_progress(in_progress) if absent. */
   ensurePartStarted(studentId: string, partId: string): Promise<void>;
+  /**
+   * Give the student srs_cards for the words of the part's lesson they do not have yet
+   * (idempotent, due now). Optional so existing stores keep compiling; the production store implements it.
+   */
+  addLessonCards?(studentId: string, partId: string): Promise<void>;
   /** Flip to completed; true only if THIS call changed it (it was not completed before). */
   markPartCompleted(studentId: string, partId: string): Promise<boolean>;
   /** award_xp(); true when XP was actually granted (idempotent per student/reason/ref). */
@@ -84,6 +89,8 @@ export async function completePart(
   }
 
   await store.ensurePartStarted(studentId, partId);
+  // Before the status flip: if this throws the part stays uncompleted and a retry redoes everything.
+  await store.addLessonCards?.(studentId, partId);
   const newlyCompleted = await store.markPartCompleted(studentId, partId);
   const granted = await store.awardXp(studentId, PART_COMPLETED, "part_completed", partId);
   return { completed: true, newlyCompleted, xpAwarded: granted ? PART_COMPLETED : 0 };

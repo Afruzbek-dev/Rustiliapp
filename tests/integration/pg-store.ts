@@ -87,6 +87,10 @@ export function pgStore(userId: string | null): AttemptStore {
       asServiceCommitted(async (q) => {
         await q('insert into public.part_progress (student_id, lesson_part_id) values ($1,$2) on conflict do nothing', [s, p]);
       }),
+    addLessonCards: (s, p) =>
+      asServiceCommitted(async (q) => {
+        await q('select public.srs_add_lesson_words($1,$2)', [s, p]);
+      }),
     markPartCompleted: (s, p) =>
       asServiceCommitted(
         async (q) =>

@@ -211,6 +211,20 @@ language sql stable security definer set search_path = public as $$
       or p_course in (select public.active_course_ids())
 $$;
 
+-- These helpers only serve RLS policies for signed-in users (and server code).
+revoke execute on function
+  public.module_course_id(uuid), public.lesson_course_id(uuid), public.part_course_id(uuid),
+  public.block_course_id(uuid), public.exercise_course_id(uuid), public.word_course_id(uuid),
+  public.test_course_id(uuid), public.test_is_published(uuid), public.exercise_is_published(uuid),
+  public.can_review_course(uuid), public.can_view_course(uuid)
+  from public, anon;
+grant execute on function
+  public.module_course_id(uuid), public.lesson_course_id(uuid), public.part_course_id(uuid),
+  public.block_course_id(uuid), public.exercise_course_id(uuid), public.word_course_id(uuid),
+  public.test_course_id(uuid), public.test_is_published(uuid), public.exercise_is_published(uuid),
+  public.can_review_course(uuid), public.can_view_course(uuid)
+  to authenticated, service_role;
+
 -- ---------------------------------------------------------------------------
 -- Integrity triggers
 -- ---------------------------------------------------------------------------
@@ -404,3 +418,8 @@ create policy test_items_update on public.test_items for update to authenticated
   );
 create policy test_items_delete on public.test_items for delete to authenticated
   using (public.teaches_course(public.test_course_id(test_id)));
+
+-- ---------------------------------------------------------------------------
+-- API roles never truncate, add triggers to, or reference tables directly.
+-- ---------------------------------------------------------------------------
+revoke truncate, trigger, references on all tables in schema public from anon, authenticated;

@@ -84,16 +84,21 @@ self.addEventListener("fetch", (event) => {
     // otherwise the event may already be finished and the background refresh would be dropped.
     const state = caches.open(STATIC_CACHE).then(async (cache) => {
       const hit = await cache.match(request);
-      const refresh = fetch(request).then(async (res) => {
-        if (isCacheable(res)) {
-          await cache.put(request, res.clone());
+      // Clone synchronously, before the page can start reading the body.
+      const net = fetch(request).then((res) => ({ res, copy: isCacheable(res) ? res.clone() : null }));
+      // Cache write failures (quota etc.) must never affect the response the page gets.
+      const write = net
+        .then(async ({ copy }) => {
+          if (!copy) return;
+          await cache.put(request, copy);
           await trim(cache);
-        }
-        return res;
-      });
-      return { hit, refresh };
+        })
+        .catch(() => {});
+      const response = net.then(({ res }) => res);
+      response.catch(() => {}); // avoid an unhandled rejection when a cached icon is served
+      return { hit, response, write };
     });
-    event.waitUntil(state.then((s) => s.refresh).catch(() => {}));
-    event.respondWith(state.then((s) => s.hit || s.refresh));
+    event.waitUntil(state.then((s) => s.write).catch(() => {}));
+    event.respondWith(state.then((s) => s.hit || s.response));
   }
 });

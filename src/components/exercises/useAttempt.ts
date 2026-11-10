@@ -16,7 +16,7 @@ export type AttemptResult = {
   partCompleted?: boolean;
 };
 
-export type AttemptError = "network" | "auth" | "server";
+export type AttemptError = "network" | "auth" | "forbidden" | "notfound" | "invalid" | "server";
 
 export interface UseAttempt {
   submit: (answer: Answer) => Promise<AttemptResult | null>;
@@ -29,6 +29,15 @@ export interface UseAttempt {
 
 function isResult(v: unknown): v is AttemptResult {
   return typeof v === "object" && v !== null && typeof (v as AttemptResult).correct === "boolean";
+}
+
+function errorFor(http: number | undefined): AttemptError {
+  if (http === undefined) return "network";
+  if (http === 401) return "auth";
+  if (http === 403) return "forbidden";
+  if (http === 404) return "notfound";
+  if (http === 400) return "invalid";
+  return "server";
 }
 
 /**
@@ -78,11 +87,11 @@ export function useAttempt(exerciseId: string): UseAttempt {
       } catch (e) {
         if (ctl.signal.aborted) return null;
         const http = (e as { httpStatus?: number }).httpStatus;
-        setError(http === 401 ? "auth" : http !== undefined ? "server" : "network");
+        setError(errorFor(http));
         setStatus("error");
         return null;
       } finally {
-        busy.current = false;
+        if (controller.current === ctl) busy.current = false;
       }
     },
     [exerciseId],
@@ -95,6 +104,7 @@ export function useAttempt(exerciseId: string): UseAttempt {
 
   const reset = useCallback(() => {
     controller.current?.abort();
+    controller.current = null;
     busy.current = false;
     setStatus("idle");
     setResult(null);

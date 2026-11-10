@@ -20,7 +20,12 @@ const ERROR_TEXT: Record<AttemptError, string> = {
   network: "Ulanishda xatolik. Internetni tekshirib, qayta urinib ko'ring.",
   server: "Server javob bermadi. Qayta urinib ko'ring.",
   auth: "Seans tugagan. Qayta kiring va yana urinib ko'ring.",
+  forbidden: "Bu mashqni bajarishga ruxsat yo'q.",
+  notfound: "Mashq topilmadi.",
+  invalid: "Javob noto'g'ri formatda. Sahifani yangilang.",
 };
+
+const RETRYABLE: AttemptError[] = ["network", "server"];
 
 /** Bottom-pinned verdict. Takes focus when it appears. */
 export function FeedbackSheet({
@@ -84,9 +89,15 @@ export function FeedbackSheet({
       {!isError && !correct && hint && <p className="mt-1 text-sm text-ink-2">{hint}</p>}
       <div className="mt-4">
         {isError ? (
-          <Button fullWidth size="lg" onClick={onRetry}>
-            Qayta urinish
-          </Button>
+          error === "auth" ? (
+            <Button fullWidth size="lg" href="/login">
+              Qayta kirish
+            </Button>
+          ) : RETRYABLE.includes(error ?? "network") ? (
+            <Button fullWidth size="lg" onClick={onRetry}>
+              Qayta urinish
+            </Button>
+          ) : null
         ) : (
           <Button fullWidth size="lg" variant={correct ? "success" : "primary"} onClick={onContinue}>
             {correct ? "Davom etish" : "Tushundim"}

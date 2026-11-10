@@ -42,6 +42,16 @@ describe('0006 attempt_stats / correct_refs', () => {
     expect(rows).toEqual([{ exercise_id: ex, item_id: 'a' }]);
   });
 
+  it('correct_refs excludes test items', async () => {
+    const { student, lesson, ex } = await world();
+    const [row] = await sql<{ id: string }>(`select course_id as id from public.exercises where id = $1`, [ex]);
+    const [t] = await sql<{ id: string }>(`insert into public.tests (course_id, title, published) values ($1,'T',true) returning id`, [row.id]);
+    await add(student, ex, { itemId: 'a', bucketId: 'f' }, true);
+    expect(await asService((q) => q('select * from public.correct_refs($1,$2)', [student, lesson.part1]))).toHaveLength(1);
+    await sql(`insert into public.test_items (test_id, exercise_id, section, position) values ($1,$2,'grammar',1)`, [t.id, ex]);
+    expect(await asService((q) => q('select * from public.correct_refs($1,$2)', [student, lesson.part1]))).toEqual([]);
+  });
+
   it('does not truncate at 1000 rows', async () => {
     const { student, lesson, ex } = await world();
     await sql(

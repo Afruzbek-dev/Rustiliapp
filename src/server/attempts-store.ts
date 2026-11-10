@@ -103,7 +103,19 @@ export function createSupabaseAttemptStore(user: SupabaseClient, service: Supaba
           out.push({ id: e.id, type: e.type, checkMode: e.check_mode, key: k?.answer ?? null });
         }
       }
-      return out;
+      // Exercises that are test items are excluded from part completion (the test flow owns them,
+      // and /api/attempts rejects them, so requiring them would make the part uncompletable).
+      if (out.length === 0) return out;
+      const { data: ti, error: tiError } = await service
+        .from("test_items")
+        .select("exercise_id")
+        .in(
+          "exercise_id",
+          out.map((e) => e.id),
+        );
+      fail("getPartExercises(test_items)", tiError);
+      const testItems = new Set((ti ?? []).map((r) => r.exercise_id as string));
+      return out.filter((e) => !testItems.has(e.id));
     },
 
     async getCorrectRefs(studentId, partId) {

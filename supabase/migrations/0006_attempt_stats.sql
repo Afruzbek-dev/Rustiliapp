@@ -27,6 +27,8 @@ language sql stable security definer set search_path = public as $$
     and a.is_correct
     and b.lesson_part_id = p_part
     and b.published
+    -- test items are graded by the test flow and never count towards part completion
+    and not exists (select 1 from public.test_items ti where ti.exercise_id = a.exercise_id)
 $$;
 
 revoke execute on function public.attempt_stats(uuid, uuid, text) from public, anon, authenticated;

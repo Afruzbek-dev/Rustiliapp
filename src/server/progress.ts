@@ -20,7 +20,7 @@ export interface PartExercise {
 
 /** Data access for part progress. Implemented with the service client in production. */
 export interface ProgressStore {
-  /** Exercises in the part's PUBLISHED blocks. */
+  /** Exercises in the part's PUBLISHED blocks, EXCLUDING test items (they never gate completion). */
   getPartExercises(partId: string): Promise<PartExercise[]>;
   /** Distinct correct refs (exerciseId, itemId|null) of the student in the part's published blocks. */
   getCorrectRefs(studentId: string, partId: string): Promise<{ exerciseId: string; itemId: string | null }[]>;

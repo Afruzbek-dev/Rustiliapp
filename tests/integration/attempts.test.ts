@@ -284,3 +284,54 @@ describe('supabase adapter RPC wiring (stub client)', () => {
     ]);
   });
 });
+
+describe('test items never gate part completion', () => {
+  async function addTestItem(course: string, exercise: string, position = 1) {
+    const [test] = await sql<{ id: string }>(
+      `insert into public.tests (course_id, title, published) values ($1, 'T', true) returning id`,
+      [course],
+    );
+    await sql(`insert into public.test_items (test_id, exercise_id, section, position) values ($1,$2,'grammar',$3)`, [test.id, exercise, position]);
+  }
+
+  it('a part whose only auto exercise is also a test item completes once the review work is submitted', async () => {
+    const t = await setup();
+    const fill = await createExercise(await createBlock(t.lesson.part2, 1, true), { type: 'fill_blank', answer: { x: ['да'] } });
+    const speaking = await createExercise(await createBlock(t.lesson.part2, 2, true, 'speaking'), {
+      type: 'speaking',
+      checkMode: 'review',
+      answer: {},
+    });
+    await addTestItem(t.world.course, fill);
+    expect((await t.run(fill, { itemId: 'x', value: 'да' })).status).toBe(404);
+    const store = pgStore(t.student);
+    await sql(`insert into public.submissions (student_id, exercise_id, curator_group_id, kind, text_answer) values ($1,$2,$3,'text','x')`, [
+      t.student,
+      speaking,
+      t.world.group,
+    ]);
+    expect(await completePart(store, t.student, t.lesson.part2)).toEqual({ completed: true, newlyCompleted: true, xpAwarded: 20 });
+  });
+
+  it('a test-item review exercise does not block completion either', async () => {
+    const t = await setup();
+    const normal = await createExercise(await createBlock(t.lesson.part2, 1, true), { type: 'fill_blank', answer: { x: ['да'] } });
+    const speakingTest = await createExercise(await createBlock(t.lesson.part2, 2, true, 'speaking'), {
+      type: 'speaking',
+      checkMode: 'review',
+      answer: {},
+    });
+    await addTestItem(t.world.course, speakingTest);
+    const r = await t.run(normal, { itemId: 'x', value: 'да' });
+    expect(r.json).toMatchObject({ correct: true, xpAwarded: 30, partCompleted: true });
+  });
+
+  it('a part with a test-item exercise plus a normal exercise completes after the normal one', async () => {
+    const t = await setup();
+    await addTestItem(t.world.course, t.conjugate); // conjugate (part1) is also a test item
+    expect((await t.run(t.conjugate, { forms: [...FORMS] })).status).toBe(404);
+    await t.run(t.classify, { itemId: 'a', bucketId: 'f' });
+    const r = await t.run(t.classify, { itemId: 'b', bucketId: 'm' });
+    expect(r.json).toMatchObject({ correct: true, xpAwarded: 30, partCompleted: true });
+  });
+});

@@ -65,7 +65,8 @@ export function pgStore(userId: string | null): AttemptStore {
             `select e.id, e.type, e.check_mode, k.answer
                from public.blocks b join public.exercises e on e.block_id = b.id
                left join public.exercise_keys k on k.exercise_id = e.id
-              where b.lesson_part_id = $1 and b.published`,
+              where b.lesson_part_id = $1 and b.published
+                and not exists (select 1 from public.test_items ti where ti.exercise_id = e.id)`,
             [partId],
           )
         ).map((r) => ({ id: r.id, type: r.type, checkMode: r.check_mode, key: r.answer ?? null })),

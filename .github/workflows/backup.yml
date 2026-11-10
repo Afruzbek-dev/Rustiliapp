@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: db-backup
+  cancel-in-progress: false
+
 jobs:
   dump:
     runs-on: ubuntu-latest
@@ -32,10 +36,23 @@ jobs:
             exit 1
           fi
           umask 077
-          # The connection string stays in the environment (libpq reads a URI from PGDATABASE); never echoed.
-          export PGDATABASE="$SUPABASE_DB_URL"
-          /usr/lib/postgresql/16/bin/pg_dump --no-owner --no-privileges | gzip -9 > "backup-$(date -u +%Y%m%d).sql.gz"
-          ls -l backup-*.sql.gz
+          # The URI must be passed as --dbname: libpq does not expand a URI placed in PGDATABASE.
+          # GitHub masks the secret in logs; never echo it or enable `set -x`.
+          file="backup-$(date -u +%Y%m%d).sql.gz"
+          /usr/lib/postgresql/16/bin/pg_dump --dbname="$SUPABASE_DB_URL" --no-owner --no-privileges | gzip -9 > "$file"
+
+          # Sanity checks: a failed or empty dump must fail the job.
+          size=$(stat -c %s "$file")
+          if [ "$size" -lt 1024 ]; then
+            echo "::error::Backup is suspiciously small ($size bytes)."
+            exit 1
+          fi
+          header=$(zcat "$file" | head -n 20 || true)
+          if ! grep -q 'PostgreSQL database dump' <<<"$header"; then
+            echo "::error::Backup does not look like a pg_dump file."
+            exit 1
+          fi
+          ls -l "$file"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

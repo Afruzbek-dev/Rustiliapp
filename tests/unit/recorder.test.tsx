@@ -88,6 +88,39 @@ describe("Recorder", () => {
     expect(screen.getByLabelText("Yozuvni tinglash")).toBeInTheDocument();
   });
 
+  it("limits the recording by wall-clock time even when interval ticks are throttled", async () => {
+    await startRecording();
+    await act(async () => {
+      vi.setSystemTime(Date.now() + 60_000); // a hidden tab that skipped every tick
+      vi.advanceTimersByTime(5000);
+    });
+    expect(FakeRecorder.instances[0]!.state).toBe("inactive");
+    expect(screen.getByRole("status")).toHaveTextContent("Vaqt tugadi");
+  });
+
+  it("stops a stream that arrives after unmount (permission prompt still pending)", async () => {
+    let resolve!: (s: unknown) => void;
+    getUserMedia.mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    render(<Recorder exerciseId="ex1" />);
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "Yozishni boshlash" }));
+    cleanup();
+    await act(async () => {
+      resolve({ getTracks: () => [{ stop: trackStop }] });
+    });
+    expect(trackStop).toHaveBeenCalledTimes(1);
+    expect(FakeRecorder.instances).toHaveLength(0);
+  });
+
+  it("releases the microphone and shows an error when MediaRecorder fails", async () => {
+    await startRecording();
+    await act(async () => {
+      (FakeRecorder.instances[0] as unknown as { onerror: () => void }).onerror();
+    });
+    expect(trackStop).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("alert")).toHaveTextContent("Mikrofonni ishga tushirib bo'lmadi");
+  });
+
   it("shows a clear state when microphone permission is denied", async () => {
     getUserMedia.mockRejectedValueOnce(Object.assign(new Error("x"), { name: "NotAllowedError" }));
     await startRecording();

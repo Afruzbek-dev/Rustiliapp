@@ -67,6 +67,10 @@ export function Recorder({ exerciseId, maxSeconds = MAX_SECONDS, onSent }: Recor
   const blobRef = useRef<Blob | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
   const timerRef = useRef<number | null>(null);
+  const limitRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
+  const autoStopped = useRef(false);
+  const [announce, setAnnounce] = useState("");
   // Survives a failed send so a retry resumes (a finished upload is not repeated).
   const uploadRef = useRef<{ submissionId: string; uploadUrl: string; uploaded: boolean } | null>(null);
 
@@ -78,10 +82,21 @@ export function Recorder({ exerciseId, maxSeconds = MAX_SECONDS, onSent }: Recor
     setSupport(ok ? "yes" : "no");
   }, []);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const releaseMic = useCallback(() => {
     if (timerRef.current !== null) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
+    }
+    if (limitRef.current !== null) {
+      window.clearTimeout(limitRef.current);
+      limitRef.current = null;
     }
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
@@ -135,6 +150,11 @@ export function Recorder({ exerciseId, maxSeconds = MAX_SECONDS, onSent }: Recor
       else setMicError(true);
       return;
     }
+    if (!mountedRef.current) {
+      // The component unmounted while the permission prompt was pending: do not keep the mic on.
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
     streamRef.current = stream;
     try {
       const Ctx: typeof AudioContext | undefined =
@@ -163,6 +183,14 @@ export function Recorder({ exerciseId, maxSeconds = MAX_SECONDS, onSent }: Recor
     rec.ondataavailable = (e: BlobEvent) => {
       if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
     };
+    rec.onerror = () => {
+      rec.ondataavailable = null;
+      rec.onstop = null;
+      releaseMic();
+      setMicError(true);
+      setPhase("idle");
+      setAnnounce("Yozishda xatolik yuz berdi.");
+    };
     rec.onstop = () => {
       const type = rec.mimeType || mimeType || "audio/webm";
       const blob = new Blob(chunksRef.current, { type });
@@ -171,21 +199,27 @@ export function Recorder({ exerciseId, maxSeconds = MAX_SECONDS, onSent }: Recor
       releaseMic();
       setPreviewUrl(URL.createObjectURL(blob));
       setPhase("recorded");
+      setAnnounce(autoStopped.current ? "Vaqt tugadi, yozish to'xtatildi." : "Yozish to'xtatildi.");
     };
     recorderRef.current = rec;
     rec.start();
     setSeconds(0);
     setPhase("recording");
-    let elapsed = 0;
+    setAnnounce("Yozish boshlandi.");
+    autoStopped.current = false;
+    // Wall-clock based: a throttled background tab cannot stretch the limit. The timeout enforces
+    // the limit, the interval only refreshes the on-screen timer.
+    const startedAt = Date.now();
+    const finish = () => {
+      autoStopped.current = true;
+      if (rec.state !== "inactive") rec.stop();
+    };
+    limitRef.current = window.setTimeout(finish, maxSeconds * 1000);
     timerRef.current = window.setInterval(() => {
-      elapsed += 1;
+      const elapsed = Math.min(maxSeconds, Math.floor((Date.now() - startedAt) / 1000));
       setSeconds(elapsed);
-      if (elapsed >= maxSeconds) {
-        if (timerRef.current !== null) window.clearInterval(timerRef.current);
-        timerRef.current = null;
-        if (rec.state !== "inactive") rec.stop();
-      }
-    }, 1000);
+      if (elapsed >= maxSeconds) finish();
+    }, 250);
   }, [maxSeconds, releaseMic]);
 
   const reset = useCallback(() => {
@@ -255,6 +289,9 @@ export function Recorder({ exerciseId, maxSeconds = MAX_SECONDS, onSent }: Recor
   const recording = phase === "recording";
   return (
     <div className="flex flex-col items-center gap-4">
+      <p role="status" aria-live="polite" className="sr-only">
+        {announce}
+      </p>
       {denied && (
         <div role="alert" className="flex w-full items-start gap-3 rounded-[var(--radius-md)] bg-fire-bg p-3 text-fire-text">
           <MicOff aria-hidden="true" className="mt-0.5 size-5 shrink-0" />

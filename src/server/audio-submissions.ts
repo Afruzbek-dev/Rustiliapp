@@ -6,8 +6,6 @@ import { completePart, type ProgressStore } from "./progress";
 export const AUDIO_MIME_EXT = { "audio/webm": "webm", "audio/mp4": "mp4", "audio/ogg": "ogg" } as const;
 export type AudioMime = keyof typeof AUDIO_MIME_EXT;
 export const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
-export const UPLOAD_LIMIT = 3;
-export const UPLOAD_WINDOW_MS = 10 * 60 * 1000;
 export const MAX_JSON_BYTES = 4 * 1024;
 
 export interface SpeakingExercise {
@@ -25,6 +23,7 @@ export interface AudioSubmissionRow {
   exerciseId: string;
   kind: string;
   storagePath: string | null;
+  notifiedAt: string | null;
 }
 
 /**
@@ -43,8 +42,16 @@ export interface AudioStore extends ProgressStore {
   isTestItem(exerciseId: string): Promise<boolean>;
   /** SERVICE read: the student's active, unexpired enrollment in the course (null when none). */
   getActiveEnrollment(studentId: string, courseId: string): Promise<{ curatorGroupId: string | null } | null>;
-  countAudioSince(studentId: string, exerciseId: string, sinceIso: string): Promise<number>;
-  insertAudioSubmission(row: { id: string; studentId: string; exerciseId: string; curatorGroupId: string | null }): Promise<void>;
+  /**
+   * Atomic, rate-limited insert (SQL create_audio_submission: advisory lock; max 3 completed per
+   * 10 minutes and max 10 incomplete per hour for one student+exercise).
+   */
+  createAudioSubmission(row: {
+    studentId: string;
+    exerciseId: string;
+    curatorGroupId: string | null;
+    ext: string;
+  }): Promise<{ submissionId: string } | { limited: true }>;
   createSignedUpload(path: string): Promise<{ uploadUrl: string; token: string } | null>;
   getSubmission(submissionId: string): Promise<AudioSubmissionRow | null>;
   /** Object `<studentId>/<submissionId>.<ext>` in the bucket, if present. */
@@ -53,7 +60,9 @@ export interface AudioStore extends ProgressStore {
   markComplete(submissionId: string, studentId: string, path: string): Promise<boolean>;
   /** Any other completed submission of the student created at/after sinceIso. */
   hasOtherCompletedSince(studentId: string, excludeId: string, sinceIso: string): Promise<boolean>;
-  getExercisePartId(exerciseId: string): Promise<string | null>;
+  getExerciseInfo(exerciseId: string): Promise<{ partId: string | null; courseId: string } | null>;
+  /** Marks the submission as fully processed (part, daily task and curator notice done). */
+  markNotified(submissionId: string): Promise<void>;
 }
 
 export interface AudioDeps {
@@ -61,7 +70,6 @@ export interface AudioDeps {
   bumpSpeaking(studentId: string): Promise<void>;
   notify(submissionId: string): Promise<void>;
   now?: () => Date;
-  newId?: () => string;
 }
 
 type Result = { status: number; json: Record<string, unknown> };
@@ -114,17 +122,14 @@ export async function handleAudioUpload(deps: AudioDeps, req: { userId: string |
     const enrollment = await store.getActiveEnrollment(studentId, ex.courseId);
     if (!enrollment) return err(404, "not_found");
 
-    const now = (deps.now ?? (() => new Date()))();
-    const since = new Date(now.getTime() - UPLOAD_WINDOW_MS).toISOString();
-    if ((await store.countAudioSince(studentId, ex.id, since)) >= UPLOAD_LIMIT) return err(429, "rate_limited");
-
-    const submissionId = (deps.newId ?? (() => crypto.randomUUID()))();
-    await store.insertAudioSubmission({
-      id: submissionId,
+    const created = await store.createAudioSubmission({
       studentId,
       exerciseId: ex.id,
       curatorGroupId: enrollment.curatorGroupId,
+      ext: AUDIO_MIME_EXT[mime],
     });
+    if ("limited" in created) return err(429, "rate_limited");
+    const submissionId = created.submissionId;
     const signed = await store.createSignedUpload(`${studentId}/${submissionId}.${AUDIO_MIME_EXT[mime]}`);
     if (!signed) return err(500, "internal_error");
     return { status: 200, json: { submissionId, uploadUrl: signed.uploadUrl, token: signed.token } };
@@ -146,44 +151,69 @@ export async function handleAudioComplete(deps: AudioDeps, req: { userId: string
     // Foreign and unknown submissions are indistinguishable.
     if (!sub || sub.studentId !== studentId || sub.kind !== "audio") return err(404, "not_found");
 
-    let transitioned = false;
+    // Access can lapse between upload and completion.
+    const info = await store.getExerciseInfo(sub.exerciseId);
+    if (!info || !(await store.getActiveEnrollment(studentId, info.courseId))) return err(404, "not_found");
+
     if (!sub.storagePath) {
       const obj = await store.findObject(studentId, sub.id);
       if (!obj) return err(409, "upload_missing");
       if (obj.size <= 0) return err(400, "empty_upload");
       if (obj.size > MAX_AUDIO_BYTES) return err(413, "payload_too_large");
-      transitioned = await store.markComplete(sub.id, studentId, obj.name);
+      await store.markComplete(sub.id, studentId, obj.name);
     }
 
-    // Idempotent: completePart pays once; the day bump and the curator notice only fire for the
-    // call that really completed the submission.
-    const partId = await store.getExercisePartId(sub.exerciseId);
-    if (partId) await completePart(store, studentId, partId);
-
-    if (transitioned) {
+    // Idempotent by STATE, not by transition: while notified_at is null the remaining work runs
+    // (each step is itself idempotent: completePart pays once; the bump is skipped when another
+    // submission already counted today). A failure leaves notified_at null so a retry finishes it.
+    // A notifier failure is logged and leaves notified_at null (retried on the next complete call)
+    // without failing the student's request.
+    const alreadyDone = !!sub.storagePath && !!sub.notifiedAt;
+    if (!sub.notifiedAt) {
+      if (info.partId) await completePart(store, studentId, info.partId);
       const now = (deps.now ?? (() => new Date()))();
       const dayStart = new Date(`${tashkentDay(now)}T00:00:00+05:00`).toISOString();
       if (!(await store.hasOtherCompletedSince(studentId, sub.id, dayStart))) await deps.bumpSpeaking(studentId);
       try {
         await deps.notify(sub.id);
+        await store.markNotified(sub.id);
       } catch (e) {
         console.error("audio-submissions: notify failed", e instanceof Error ? e.name : "unknown");
       }
     }
-    return { status: 200, json: { ok: true, alreadyComplete: !transitioned } };
+    return { status: 200, json: { ok: true, alreadyComplete: alreadyDone } };
   } catch (e) {
     return internal(e);
   }
 }
 
-/** Reads a JSON body with a hard cap (4 KB): 413 when too large, 400 when not valid JSON. */
+/** Reads a JSON body with a hard cap (4 KB), never buffering more than the cap even without Content-Length. */
 export async function readSmallJson(request: Request): Promise<{ ok: true; body: unknown } | { ok: false; status: 400 | 413 }> {
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_JSON_BYTES) return { ok: false, status: 413 };
-  const text = await request.text();
-  if (new TextEncoder().encode(text).length > MAX_JSON_BYTES) return { ok: false, status: 413 };
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (request.body) {
+    const reader = request.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_JSON_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return { ok: false, status: 413 };
+      }
+      chunks.push(value);
+    }
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    buf.set(c, off);
+    off += c.byteLength;
+  }
   try {
-    return { ok: true, body: JSON.parse(text) as unknown };
+    return { ok: true, body: JSON.parse(new TextDecoder().decode(buf)) as unknown };
   } catch {
     return { ok: false, status: 400 };
   }

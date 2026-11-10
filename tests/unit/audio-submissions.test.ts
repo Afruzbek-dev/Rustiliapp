@@ -18,11 +18,12 @@ const GROUP = "55555555-5555-4555-8555-555555555555";
 const PART = "66666666-6666-4666-8666-666666666666";
 const NEWID = "77777777-7777-4777-8777-777777777777";
 
-function setup(over: { exercise?: Partial<SpeakingExercise> | null; testItem?: boolean; enrolled?: boolean; role?: string } = {}) {
+function setup(over: { limited?: boolean; failPartOnce?: boolean; exercise?: Partial<SpeakingExercise> | null; testItem?: boolean; enrolled?: boolean; role?: string } = {}) {
   const subs = new Map<string, AudioSubmissionRow & { createdAt: number }>();
   const objects = new Map<string, { name: string; size: number }>();
   const awarded: string[] = [];
   let partDone = false;
+  const failed = { done: false };
   const exercise: SpeakingExercise | null =
     over.exercise === null
       ? null
@@ -35,11 +36,11 @@ function setup(over: { exercise?: Partial<SpeakingExercise> | null; testItem?: b
     getVisibleExercise: async (id) => (exercise && exercise.id === id ? exercise : null),
     isTestItem: async () => over.testItem ?? false,
     getActiveEnrollment: async () => (over.enrolled === false ? null : { curatorGroupId: GROUP }),
-    countAudioSince: async (sid, eid, since) =>
-      [...subs.values()].filter((s) => s.studentId === sid && s.exerciseId === eid && s.createdAt >= Date.parse(since)).length,
-    insertAudioSubmission: async (r) => {
-      subs.set(r.id, { id: r.id, studentId: r.studentId, exerciseId: r.exerciseId, kind: "audio", storagePath: null, createdAt: nowMs });
+    createAudioSubmission: async (r) => {
+      if (over.limited) return { limited: true };
+      subs.set(NEWID, { id: NEWID, studentId: r.studentId, exerciseId: r.exerciseId, kind: "audio", storagePath: null, notifiedAt: null, createdAt: nowMs });
       (store as unknown as { lastGroup: string | null }).lastGroup = r.curatorGroupId;
+      return { submissionId: NEWID };
     },
     createSignedUpload: async (path) => {
       calls.signed.push(path);
@@ -54,8 +55,17 @@ function setup(over: { exercise?: Partial<SpeakingExercise> | null; testItem?: b
       return true;
     },
     hasOtherCompletedSince: async (sid, ex) => [...subs.values()].some((s) => s.studentId === sid && s.id !== ex && s.storagePath),
-    getExercisePartId: async () => PART,
-    getPartExercises: async () => [{ id: EX, type: "speaking", checkMode: "review", key: null }],
+    getExerciseInfo: async () => ({ partId: PART, courseId: COURSE }),
+    markNotified: async (id) => {
+      subs.get(id)!.notifiedAt = "now";
+    },
+    getPartExercises: async () => {
+      if (over.failPartOnce && !failed.done) {
+        failed.done = true;
+        throw new Error("boom");
+      }
+      return [{ id: EX, type: "speaking", checkMode: "review", key: null }];
+    },
     getCorrectRefs: async () => [],
     getSubmittedExerciseIds: async (sid) => ([...subs.values()].some((s) => s.studentId === sid && s.storagePath) ? [EX] : []),
     ensurePartStarted: async () => undefined,
@@ -75,7 +85,6 @@ function setup(over: { exercise?: Partial<SpeakingExercise> | null; testItem?: b
     bumpSpeaking: async () => void calls.bump++,
     notify: async (id) => void calls.notify.push(id),
     now: () => new Date(nowMs),
-    newId: () => NEWID,
   };
   return { store, deps, subs, objects, calls, awarded };
 }
@@ -126,20 +135,9 @@ describe("audio-upload", () => {
     expect((await up(deps, { exerciseId: EX, mime: "audio/ogg" })).status).toBe(200);
   });
 
-  it("refuses the 4th upload within 10 minutes", async () => {
-    const { deps, subs } = setup();
-    for (let i = 0; i < 3; i++) {
-      subs.set(`id${i}`, { id: `id${i}`, studentId: S, exerciseId: EX, kind: "audio", storagePath: null, createdAt: Date.parse("2026-11-10T06:55:00Z") });
-    }
-    expect((await up(deps, { exerciseId: EX, mime: "audio/webm" })).status).toBe(429);
-  });
-
-  it("old submissions do not count against the limit", async () => {
-    const { deps, subs } = setup();
-    for (let i = 0; i < 3; i++) {
-      subs.set(`id${i}`, { id: `id${i}`, studentId: S, exerciseId: EX, kind: "audio", storagePath: null, createdAt: Date.parse("2026-11-10T06:00:00Z") });
-    }
-    expect((await up(deps, { exerciseId: EX, mime: "audio/webm" })).status).toBe(200);
+  it("maps the SQL rate limit to 429", async () => {
+    const { deps } = setup({ limited: true });
+    expect(await up(deps, { exerciseId: EX, mime: "audio/webm" })).toEqual({ status: 429, json: { error: "rate_limited" } });
   });
 });
 
@@ -200,10 +198,35 @@ describe("audio-complete", () => {
   });
 
   it("bumps the daily task only once per day across submissions", async () => {
-    t.subs.set("earlier", { id: "earlier", studentId: S, exerciseId: EX, kind: "audio", storagePath: `${S}/earlier.webm`, createdAt: Date.parse("2026-11-10T05:00:00Z") });
+    t.subs.set("earlier", { id: "earlier", studentId: S, exerciseId: EX, kind: "audio", storagePath: `${S}/earlier.webm`, notifiedAt: null, createdAt: Date.parse("2026-11-10T05:00:00Z") });
     t.objects.set(`${S}/${NEWID}`, { name: `${S}/${NEWID}.webm`, size: 5000 });
     await done(t.deps, { submissionId: NEWID });
     expect(t.calls.bump).toBe(0);
+  });
+
+  it("a failure after markComplete is finished by the retry exactly once; a third call does nothing", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const f = setup({ failPartOnce: true });
+    await up(f.deps, { exerciseId: EX, mime: "audio/webm" });
+    f.objects.set(`${S}/${NEWID}`, { name: `${S}/${NEWID}.webm`, size: 5000 });
+    expect((await done(f.deps, { submissionId: NEWID })).status).toBe(500);
+    expect(f.subs.get(NEWID)?.storagePath).toBe(`${S}/${NEWID}.webm`);
+    expect(f.calls.bump + f.calls.notify.length).toBe(0);
+    const retry = await done(f.deps, { submissionId: NEWID });
+    expect(retry).toEqual({ status: 200, json: { ok: true, alreadyComplete: false } });
+    expect(f.calls.bump).toBe(1);
+    expect(f.calls.notify).toEqual([NEWID]);
+    expect(f.awarded).toEqual([PART]);
+    expect((await done(f.deps, { submissionId: NEWID })).json).toEqual({ ok: true, alreadyComplete: true });
+    expect(f.calls.bump).toBe(1);
+    expect(f.calls.notify).toHaveLength(1);
+  });
+
+  it("404 when the enrollment lapsed before completion", async () => {
+    t.objects.set(`${S}/${NEWID}`, { name: `${S}/${NEWID}.webm`, size: 5000 });
+    t.store.getActiveEnrollment = async () => null;
+    expect((await done(t.deps, { submissionId: NEWID })).status).toBe(404);
+    expect(t.subs.get(NEWID)?.storagePath).toBeNull();
   });
 
   it("a notifier failure does not fail the request", async () => {
@@ -211,6 +234,7 @@ describe("audio-complete", () => {
     t.objects.set(`${S}/${NEWID}`, { name: `${S}/${NEWID}.webm`, size: 5000 });
     const r = await done({ ...t.deps, notify: async () => Promise.reject(new Error("tg down")) }, { submissionId: NEWID });
     expect(r.status).toBe(200);
+    expect(t.subs.get(NEWID)?.notifiedAt).toBeNull();
   });
 });
 
@@ -218,6 +242,16 @@ describe("readSmallJson", () => {
   it("caps the body at 4 KB", async () => {
     const big = new Request("http://x", { method: "POST", body: JSON.stringify({ a: "x".repeat(5000) }) });
     expect(await readSmallJson(big)).toEqual({ ok: false, status: 413 });
+    const streamed = new Request("http://x", {
+      method: "POST",
+      body: new ReadableStream({
+        pull(c) {
+          c.enqueue(new TextEncoder().encode("x".repeat(3000)));
+        },
+      }),
+      duplex: "half",
+    } as RequestInit);
+    expect(await readSmallJson(streamed)).toEqual({ ok: false, status: 413 });
     expect(await readSmallJson(new Request("http://x", { method: "POST", body: "{" }))).toEqual({ ok: false, status: 400 });
     expect(await readSmallJson(new Request("http://x", { method: "POST", body: '{"a":1}' }))).toEqual({ ok: true, body: { a: 1 } });
   });

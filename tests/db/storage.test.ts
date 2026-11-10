@@ -117,4 +117,57 @@ describe('0009 storage: submissions bucket', () => {
       /permission denied/,
     );
   });
+
+  describe('create_audio_submission', () => {
+    let exercise: string;
+    let studentA: string;
+    beforeAll(async () => {
+      const lesson = await createLesson(world.course);
+      const block = await createBlock(lesson.part2, 1, true, 'speaking');
+      exercise = await createExercise(block, { type: 'speaking', checkMode: 'review', answer: {} });
+      studentA = await createActiveStudent(world.cohort, world.group);
+    });
+    const call = (student: string) =>
+      sql(`select * from public.create_audio_submission($1, $2, $3, 'webm')`, [student, exercise, world.group]);
+    const complete = (student: string) =>
+      sql(
+        `update public.submissions set storage_path = student_id || '/' || id || '.webm'
+         where student_id = $1 and exercise_id = $2 and storage_path is null`,
+        [student, exercise],
+      );
+
+    it('8 concurrent calls are all admitted while incomplete; after completion the limit applies', async () => {
+      // incomplete rows do not count toward the 10-minute limit, so complete them as they come
+      const s = await createActiveStudent(world.cohort, world.group);
+      const first = await Promise.all(Array.from({ length: 8 }, () => call(s)));
+      expect(first.filter((r) => r[0].outcome === 'ok')).toHaveLength(8);
+      await complete(s);
+      const second = await Promise.all(Array.from({ length: 8 }, () => call(s)));
+      expect(second.filter((r) => r[0].outcome === 'ok')).toHaveLength(0);
+      expect(second.every((r) => r[0].outcome === 'rate_limited')).toBe(true);
+    });
+
+    it('caps incomplete rows at 10 per hour under concurrency', async () => {
+      const results = await Promise.all(Array.from({ length: 14 }, () => call(studentA)));
+      expect(results.filter((r) => r[0].outcome === 'ok')).toHaveLength(10);
+      expect(results.filter((r) => r[0].outcome === 'too_many_incomplete')).toHaveLength(4);
+    });
+
+    it('3 completed in the window then rate_limited; old completed rows do not count', async () => {
+      const s = await createActiveStudent(world.cohort, world.group);
+      for (let i = 0; i < 3; i++) {
+        expect((await call(s))[0].outcome).toBe('ok');
+        await complete(s);
+      }
+      expect((await call(s))[0].outcome).toBe('rate_limited');
+      await sql(`update public.submissions set created_at = now() - interval '11 minutes' where student_id = $1`, [s]);
+      expect((await call(s))[0].outcome).toBe('ok');
+    });
+
+    it('is service_role only', async () => {
+      await expect(
+        withUser(studentA, (q) => q(`select * from public.create_audio_submission($1, $2, $3, 'webm')`, [studentA, exercise, world.group])),
+      ).rejects.toThrow(/permission denied/);
+    });
+  });
 });

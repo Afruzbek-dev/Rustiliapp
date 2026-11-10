@@ -80,19 +80,20 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (url.pathname.startsWith("/icons/")) {
-    event.respondWith(
-      caches.open(STATIC_CACHE).then(async (cache) => {
-        const hit = await cache.match(request);
-        const refresh = fetch(request).then((res) => {
-          store(event, cache, request, res);
-          return res;
-        });
-        if (hit) {
-          refresh.catch(() => {});
-          return hit;
+    // Stale-while-revalidate. waitUntil MUST be called synchronously here (never from a later .then),
+    // otherwise the event may already be finished and the background refresh would be dropped.
+    const state = caches.open(STATIC_CACHE).then(async (cache) => {
+      const hit = await cache.match(request);
+      const refresh = fetch(request).then(async (res) => {
+        if (isCacheable(res)) {
+          await cache.put(request, res.clone());
+          await trim(cache);
         }
-        return refresh;
-      }),
-    );
+        return res;
+      });
+      return { hit, refresh };
+    });
+    event.waitUntil(state.then((s) => s.refresh).catch(() => {}));
+    event.respondWith(state.then((s) => s.hit || s.refresh));
   }
 });

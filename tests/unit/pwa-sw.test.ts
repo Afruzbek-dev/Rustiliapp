@@ -65,17 +65,45 @@ function setup(fetchImpl: (req: unknown) => Promise<FakeRes>) {
   const Response = { error: () => ({ status: 0, type: "error", clone() { return this; } }) };
   vm.runInNewContext(swSource, { self, caches, fetch: fetchMock, Request, Response, URL, Promise });
 
+  // Models the real lifecycle: waitUntil is only legal while respondWith is pending or an
+  // extension promise is still pending; otherwise it throws InvalidStateError.
   const fire = async (req: { url: string; method?: string; mode?: string }) => {
     let responded: Promise<unknown> | undefined;
+    let respondPending = false;
+    let pending = 0;
     const waits: Promise<unknown>[] = [];
-    handlers.fetch({
+    let earlyResult: unknown;
+    const event = {
       request: { method: "GET", mode: "cors", ...req },
-      respondWith: (p: Promise<unknown>) => void (responded = p),
-      waitUntil: (p: Promise<unknown>) => void waits.push(p),
-    });
+      respondWith: (p: Promise<unknown>) => {
+        respondPending = true;
+        responded = p.then(
+          (v) => {
+            earlyResult = v;
+            respondPending = false;
+            return v;
+          },
+          (e) => {
+            respondPending = false;
+            throw e;
+          },
+        );
+      },
+      waitUntil: (p: Promise<unknown>) => {
+        if (!inHandler && !respondPending && pending === 0) {
+          throw new Error("InvalidStateError: waitUntil after event finished");
+        }
+        pending++;
+        waits.push(p.finally(() => void pending--));
+      },
+    };
+    let inHandler = true;
+    handlers.fetch(event);
+    inHandler = false;
     const result = responded ? await responded : undefined;
+    const settledAtRespond = earlyResult;
     await Promise.all(waits);
-    return { handled: responded !== undefined, result };
+    return { handled: responded !== undefined, result: settledAtRespond ?? result };
   };
   return { handlers, stores, caches, fetchMock, fire, claim, self };
 }
@@ -97,29 +125,33 @@ describe("public/sw.js", () => {
     expect((await t.fire({ url: `${A}/_next/static/a.js`, method: "POST" })).handled).toBe(false);
     expect((await t.fire({ url: "https://cdn.other/_next/static/a.js" })).handled).toBe(false);
     expect((await t.fire({ url: `${A}/api/progress` })).handled).toBe(false);
+    expect((await t.fire({ url: `${A}/api/icons/x.png` })).handled).toBe(false);
+    expect((await t.fire({ url: `${A}/api/_next/static/x.js` })).handled).toBe(false);
     expect((await t.fire({ url: `${A}/photo.png` })).handled).toBe(false);
     expect((await t.fire({ url: `${A}/_next/image?url=x` })).handled).toBe(false);
     expect(t.fetchMock).not.toHaveBeenCalled();
   });
 
-  it("serves /offline only when the network fails, not on 4xx/5xx", async () => {
-    const t = setup(async () => res(500));
-    const install = t.handlers.install as (e: unknown) => void;
+  it("serves /offline only on network error; 5xx navigations pass through unchanged", async () => {
+    const serverError = res(500);
+    const t = setup(async () => serverError);
     let p: Promise<unknown> = Promise.resolve();
-    install({ waitUntil: (x: Promise<unknown>) => (p = x) });
+    t.handlers.install({ waitUntil: (x: Promise<unknown>) => (p = x) });
     await p;
     const bad = await t.fire({ url: `${A}/home`, mode: "navigate" });
-    expect((bad.result as FakeRes).status).toBe(500);
+    expect(bad.result).toBe(serverError);
+    const notFound = res(404);
+    t.fetchMock.mockResolvedValueOnce(notFound);
+    expect((await t.fire({ url: `${A}/nope`, mode: "navigate" })).result).toBe(notFound);
 
-    const t2 = setup(async () => {
-      throw new TypeError("offline");
-    });
+    const t2 = setup(async () => res());
     let p2: Promise<unknown> = Promise.resolve();
     t2.handlers.install({ waitUntil: (x: Promise<unknown>) => (p2 = x) });
-    await p2.catch(() => {});
-    // install itself fetches nothing (cache.add is mocked), so the fallback must now exist.
+    await p2;
+    const offlineRes = await t2.caches.match("/offline");
+    t2.fetchMock.mockRejectedValue(new TypeError("offline"));
     const off = await t2.fire({ url: `${A}/home`, mode: "navigate" });
-    expect((off.result as FakeRes).status).toBe(200);
+    expect(off.result).toBe(offlineRes);
   });
 
   it("does not cache 206 or opaque responses, caches 200 basic under /_next/static", async () => {
@@ -138,11 +170,16 @@ describe("public/sw.js", () => {
     expect(t3.stores.get("po-russki-v2")?.size).toBe(1);
   });
 
-  it("revalidates /icons (stale-while-revalidate), always fetching", async () => {
-    const t = setup(async () => res(200));
-    await t.fire({ url: `${A}/icons/icon-192.png` });
-    await t.fire({ url: `${A}/icons/icon-192.png` });
-    expect(t.fetchMock).toHaveBeenCalledTimes(2);
+  it("icons: returns the stale entry immediately and refreshes the cache via waitUntil", async () => {
+    const stale = res(200);
+    const fresh = res(200);
+    const t = setup(async () => fresh);
+    const cache = await t.caches.open("po-russki-v2");
+    await cache.put({ url: `${A}/icons/icon-192.png` }, stale);
+    const out = await t.fire({ url: `${A}/icons/icon-192.png` });
+    expect(out.result).toBe(stale);
+    expect(t.fetchMock).toHaveBeenCalledTimes(1);
+    expect(t.stores.get("po-russki-v2")?.get(`${A}/icons/icon-192.png`)).toBe(fresh);
   });
 
   it("deletes old po-russki-* caches on activate but keeps unrelated ones", async () => {

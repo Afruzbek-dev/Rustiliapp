@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #FAF7EC;
+  --card: #FFFFFF;
+  --surface-2: #F3EEDF;
+  --border: #E6E0CC;
+  --border-strong: #D9D3BC;
+  --ink: #1A1A17;
+  --ink-2: #5F5B50;
+  --ink-3: #6F6B60;
+  --brand: #FFD60A;
+  --brand-shadow: #C9A400;
+  --brand-text: #8A6A00;
+  --fire: #FF6B4A;
+  --fire-shadow: #C24A2F;
+  --fire-text: #B23A1E;
+  --fire-bg: #FFE3DB;
+  --ok: #3DDC84;
+  --ok-shadow: #24A35E;
+  --ok-text: #157A43;
+  --ok-bg: #DDF7E7;
+  --info: #3D7BEA;
+  --info-strong: #1F55B8;
+  --info-bg: #E3ECFC;
+  --radius-sm: 12px;
+  --radius-md: 16px;
+  --radius-lg: 20px;
+  --radius-xl: 24px;
+  font-family: -apple-system, BlinkMacSystemFont, Inter, var(--font-inter), sans-serif;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-card: var(--card);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-brand: var(--brand);
+  --color-brand-shadow: var(--brand-shadow);
+  --color-brand-text: var(--brand-text);
+  --color-fire: var(--fire);
+  --color-fire-shadow: var(--fire-shadow);
+  --color-fire-text: var(--fire-text);
+  --color-fire-bg: var(--fire-bg);
+  --color-ok: var(--ok);
+  --color-ok-shadow: var(--ok-shadow);
+  --color-ok-text: var(--ok-text);
+  --color-ok-bg: var(--ok-bg);
+  --color-info: var(--info);
+  --color-info-strong: var(--info-strong);
+  --color-info-bg: var(--info-bg);
+  --radius-sm: 12px;
+  --radius-md: 16px;
+  --radius-lg: 20px;
+  --radius-xl: 24px;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+/* Katak fon: faqat `/` va `/path` ekranlarida */
+.bg-grid {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(#F0EBDA 1px, transparent 1px),
+    linear-gradient(90deg, #F0EBDA 1px, transparent 1px);
+  background-size: 32px 32px;
+}

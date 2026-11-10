@@ -1,0 +1,11 @@
+{
+  "update_id": 102,
+  "message": {
+    "message_id": 1,
+    "date": 1760000000,
+    "chat": { "id": 777, "type": "private", "first_name": "Ali" },
+    "from": { "id": 777, "is_bot": false, "first_name": "Ali", "last_name": "Valiyev", "username": "ali" },
+    "text": "/start login_nope",
+    "entities": [{ "offset": 0, "length": 6, "type": "bot_command" }]
+  }
+}

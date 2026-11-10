@@ -1,0 +1,10 @@
+{
+  "update_id": 103,
+  "message": {
+    "message_id": 2,
+    "date": 1760000010,
+    "chat": { "id": 777, "type": "private", "first_name": "Ali" },
+    "from": { "id": 777, "is_bot": false, "first_name": "Ali", "last_name": "Valiyev", "username": "ali" },
+    "contact": { "phone_number": "998 90 123-45-67", "first_name": "Ali", "user_id": 777 }
+  }
+}

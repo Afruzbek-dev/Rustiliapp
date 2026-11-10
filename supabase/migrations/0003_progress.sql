@@ -5,7 +5,7 @@
 -- and grading must never be client-controlled), so API roles get SELECT only.
 -- Read access:
 --   student : own rows (and reviews of own submissions)
---   curator : submissions/reviews of their groups' students
+--   curator : submissions/reviews filed under their own groups
 --   teacher : rows belonging to their own courses; admin: everything
 
 -- ---------------------------------------------------------------------------
@@ -128,8 +128,8 @@ create index test_attempts_student_test_idx on public.test_attempts (student_id,
 -- Access helper
 -- ---------------------------------------------------------------------------
 -- Who may read a submission (and its reviews): its student; the curator of the group it
--- was filed under, or of the student's current group in the same course; the course's
--- teacher; admins.
+-- was filed under (only that group — not the student's other or former groups); the
+-- course's teacher; admins.
 create function public.can_read_submission(p_submission uuid) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (
@@ -139,14 +139,13 @@ language sql stable security definer set search_path = public as $$
       and (
         s.student_id = auth.uid()
         or s.curator_group_id in (select public.curated_group_ids())
-        or (
-          s.student_id in (select public.curated_student_ids())
-          and public.exercise_course_id(s.exercise_id) in (select public.curated_course_ids())
-        )
         or public.teaches_course(public.exercise_course_id(s.exercise_id))
       )
   )
 $$;
+
+revoke execute on function public.can_read_submission(uuid) from public, anon;
+grant execute on function public.can_read_submission(uuid) to authenticated, service_role;
 
 -- ---------------------------------------------------------------------------
 -- RLS: read-only for API roles; writes are service-role only.
@@ -173,10 +172,6 @@ create policy submissions_select on public.submissions for select to authenticat
   using (
     student_id = auth.uid()
     or curator_group_id in (select public.curated_group_ids())
-    or (
-      student_id in (select public.curated_student_ids())
-      and public.exercise_course_id(exercise_id) in (select public.curated_course_ids())
-    )
     or public.teaches_course(public.exercise_course_id(exercise_id))
   );
 
@@ -188,3 +183,8 @@ create policy srs_cards_select on public.srs_cards for select to authenticated
 
 create policy test_attempts_select on public.test_attempts for select to authenticated
   using (student_id = auth.uid() or public.teaches_course(public.test_course_id(test_id)));
+
+-- ---------------------------------------------------------------------------
+-- API roles never truncate, add triggers to, or reference tables directly.
+-- ---------------------------------------------------------------------------
+revoke truncate, trigger, references on all tables in schema public from anon, authenticated;

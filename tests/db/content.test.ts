@@ -92,6 +92,53 @@ describe('0002 content RLS', () => {
     ).rejects.toThrow(/row-level security/);
   });
 
+  it('teacher B cannot write teacher A’s exercise_keys; teacher A can', async () => {
+    const [ex] = await sql(`insert into public.exercises (block_id, type) values ($1, 'choose') returning id`, [
+      draftBlock,
+    ]);
+    await expect(
+      withUser(b.teacher, (q) =>
+        q(`insert into public.exercise_keys (exercise_id, answer) values ($1, '"b"')`, [ex.id]),
+      ),
+    ).rejects.toThrow(/row-level security/);
+    const updated = await withUser(b.teacher, (q) =>
+      q(`update public.exercise_keys set answer = '"hacked"' where exercise_id = $1 returning exercise_id`, [
+        publishedExercise,
+      ]),
+    );
+    expect(updated).toEqual([]);
+    const deleted = await withUser(b.teacher, (q) =>
+      q('delete from public.exercise_keys where exercise_id = $1 returning exercise_id', [publishedExercise]),
+    );
+    expect(deleted).toEqual([]);
+    const [key] = await sql('select answer from public.exercise_keys where exercise_id = $1', [publishedExercise]);
+    expect(key.answer).toEqual({ тетрадь: 'f' });
+
+    const inserted = await withUser(a.teacher, (q) =>
+      q(`insert into public.exercise_keys (exercise_id, answer) values ($1, '"a"') returning exercise_id`, [ex.id]),
+    );
+    expect(inserted).toEqual([{ exercise_id: ex.id }]);
+  });
+
+  it('anon cannot call the content helper functions', async () => {
+    const calls = [
+      ['select public.exercise_course_id($1)', publishedExercise],
+      ['select public.exercise_is_published($1)', publishedExercise],
+      ['select public.test_is_published($1)', publishedExercise],
+      ['select public.block_course_id($1)', publishedBlock],
+      ['select public.part_course_id($1)', lesson.part1],
+      ['select public.can_view_course($1)', a.course],
+    ] as const;
+    for (const [text, arg] of calls) {
+      await expect(withUser(null, (q) => q(text, [arg]))).rejects.toThrow(/permission denied/);
+    }
+  });
+
+  it('authenticated cannot TRUNCATE content tables', async () => {
+    await expect(withUser(a.teacher, (q) => q('truncate public.exercise_keys'))).rejects.toThrow(/permission denied/);
+    await expect(withUser(a.teacher, (q) => q('truncate public.blocks'))).rejects.toThrow(/permission denied/);
+  });
+
   it('a student cannot write content or publish a draft', async () => {
     await expect(
       withUser(studentA, (q) =>

@@ -164,6 +164,62 @@ describe('0001 identity RLS', () => {
     ).toEqual([]);
   });
 
+  it('teacher A cannot read teacher B’s students’ profiles but reads their own pending applicant and curators', async () => {
+    const applicant = await createProfile('student');
+    await enroll(applicant, a.cohort, { status: 'pending' });
+    const unrelated = await createProfile('student'); // no enrollment anywhere
+    const rows = await withUser(a.teacher, (q) => q('select id from public.profiles'));
+    const ids = rows.map((r) => r.id);
+    expect(ids).toEqual(expect.arrayContaining([a.teacher, a.curator, studentA1, studentA2, studentOtherGroup, applicant]));
+    expect(ids).not.toContain(studentB);
+    expect(ids).not.toContain(b.curator);
+    expect(ids).not.toContain(b.teacher);
+    expect(ids).not.toContain(unrelated);
+  });
+
+  it('an admin reads every profile', async () => {
+    const admin = await createProfile('admin');
+    const rows = await withUser(admin, (q) =>
+      q('select id from public.profiles where id = any($1::uuid[])', [[studentA1, studentB, b.teacher]]),
+    );
+    expect(rows).toHaveLength(3);
+  });
+
+  it('a curator stops seeing the profile of an expired or rejected ex-student', async () => {
+    const expired = await createProfile('student');
+    await enroll(expired, a.cohort, { status: 'active', groupId: a.group, expiresAt: '2020-01-01T00:00:00Z' });
+    const rejected = await createProfile('student');
+    await enroll(rejected, a.cohort, { status: 'rejected', groupId: a.group });
+    const pending = await createProfile('student');
+    await enroll(pending, a.cohort, { status: 'pending', groupId: a.group });
+    const ids = (await withUser(a.curator, (q) => q('select id from public.profiles'))).map((r) => r.id);
+    expect(ids).not.toContain(expired);
+    expect(ids).not.toContain(rejected);
+    expect(ids).toContain(pending);
+  });
+
+  it('authenticated cannot TRUNCATE enrollments', async () => {
+    await expect(withUser(a.teacher, (q) => q('truncate public.enrollments'))).rejects.toThrow(/permission denied/);
+    await expect(withUser(studentA1, (q) => q('truncate public.profiles'))).rejects.toThrow(/permission denied/);
+  });
+
+  it('anon cannot call the RLS helper functions', async () => {
+    const calls = [
+      'select public.app_role()',
+      'select public.is_admin()',
+      'select public.teaches_course(gen_random_uuid())',
+      'select * from public.active_course_ids()',
+      'select * from public.curated_student_ids()',
+      'select * from public.taught_student_ids()',
+    ];
+    for (const text of calls) {
+      await expect(withUser(null, (q) => q(text))).rejects.toThrow(/permission denied/);
+    }
+    // signed-in users still can (RLS evaluates them as the caller)
+    const [row] = await withUser(studentA1, (q) => q('select public.app_role() as role'));
+    expect(row.role).toBe('student');
+  });
+
   it('a curator sees their own group and cohort, not other groups', async () => {
     const groups = await withUser(a.curator, (q) => q('select id from public.curator_groups'));
     expect(groups.map((r) => r.id)).toEqual([a.group]);

@@ -3,11 +3,14 @@ import { asService, sql, withUser } from './helpers';
 import {
   createActiveStudent,
   createBlock,
+  createCohort,
+  createCourse,
   createCourseWorld,
   createExercise,
   createGroup,
   createLesson,
   createProfile,
+  enroll,
 } from './fixtures';
 
 const scores = (s: Record<string, unknown>) =>
@@ -156,6 +159,79 @@ describe('0003 progress RLS', () => {
     const rows = await withUser(a.teacher, (q) => q('select id from public.submissions'));
     expect(rows.map((r) => r.id).sort()).toEqual([sub1, sub2, subOther].sort());
     expect(await withUser(b.teacher, (q) => q('select id from public.submissions'))).toEqual([]);
+  });
+
+  /** A published speaking exercise in `course`. */
+  async function speakingIn(course: string) {
+    const lesson = await createLesson(course);
+    const block = await createBlock(lesson.part2, 1, true, 'speaking');
+    return createExercise(block, { type: 'speaking', checkMode: 'review', answer: {} });
+  }
+
+  async function submitTo(student: string, exercise: string, group: string) {
+    const [row] = await sql(
+      `insert into public.submissions (student_id, exercise_id, curator_group_id, kind, storage_path)
+       values ($1, $2, $3, 'audio', 'y.webm') returning id`,
+      [student, exercise, group],
+    );
+    await sql(
+      `insert into public.reviews (submission_id, reviewer_id, channel, scores, total) values ($1, null, 'web', $2, 4.00)`,
+      [row.id, scores({})],
+    );
+    return row.id as string;
+  }
+
+  it('a former curator cannot read a student’s submissions, reviews or profile after re-enrolment elsewhere', async () => {
+    // S was in cohort 1 under C's group G1 (now expired), and re-enrolled in cohort 2 under D's group G2.
+    const teacher = await createProfile('teacher');
+    const course = await createCourse(teacher);
+    const cohort1 = await createCohort(course, 'Potok 1');
+    const cohort2 = await createCohort(course, 'Potok 2');
+    const c = await createProfile('curator');
+    const d = await createProfile('curator');
+    const g1 = await createGroup(cohort1, c);
+    const g2 = await createGroup(cohort2, d);
+    const s = await createProfile('student');
+    await enroll(s, cohort1, { status: 'expired', groupId: g1, expiresAt: '2020-01-01T00:00:00Z' });
+    await enroll(s, cohort2, { status: 'active', groupId: g2 });
+    const exercise = await speakingIn(course);
+    const oldSub = await submitTo(s, exercise, g1);
+    const newSub = await submitTo(s, exercise, g2);
+
+    const cSubs = await withUser(c, (q) => q('select id from public.submissions'));
+    expect(cSubs.map((r) => r.id)).toEqual([oldSub]); // history of their own group only
+    const cReviews = await withUser(c, (q) => q('select submission_id from public.reviews'));
+    expect(cReviews.map((r) => r.submission_id)).toEqual([oldSub]);
+    expect(await withUser(c, (q) => q('select id from public.profiles where id = $1', [s]))).toEqual([]);
+
+    const dSubs = await withUser(d, (q) => q('select id from public.submissions'));
+    expect(dSubs.map((r) => r.id)).toEqual([newSub]);
+    expect(await withUser(d, (q) => q('select id from public.profiles where id = $1', [s]))).toEqual([{ id: s }]);
+  });
+
+  it('a curator working in two courses only reads submissions filed under their own groups', async () => {
+    // C curates groups in course X and course Y; S is in C's group in X, but in D's group in Y.
+    const x = await createCourseWorld();
+    const y = await createCourseWorld();
+    const c = x.curator;
+    await createGroup(y.cohort, c); // C also curates a group in course Y
+    const s = await createActiveStudent(x.cohort, x.group);
+    await enroll(s, y.cohort, { status: 'active', groupId: y.group }); // y.group is curated by D (y.curator)
+    const subX = await submitTo(s, await speakingIn(x.course), x.group);
+    const subY = await submitTo(s, await speakingIn(y.course), y.group);
+
+    const cSubs = await withUser(c, (q) => q('select id from public.submissions'));
+    expect(cSubs.map((r) => r.id)).toEqual([subX]);
+    const cReviews = await withUser(c, (q) => q('select submission_id from public.reviews'));
+    expect(cReviews.map((r) => r.submission_id)).toEqual([subX]);
+    const dSubs = await withUser(y.curator, (q) => q('select id from public.submissions'));
+    expect(dSubs.map((r) => r.id)).toEqual([subY]);
+  });
+
+  it('anon cannot call can_read_submission', async () => {
+    await expect(withUser(null, (q) => q('select public.can_read_submission($1)', [sub1]))).rejects.toThrow(
+      /permission denied/,
+    );
   });
 
   it('anon sees nothing', async () => {

@@ -10,9 +10,6 @@ import {
   enroll,
 } from './fixtures';
 
-/** Today's date in Asia/Tashkent (UTC+5, no DST) as YYYY-MM-DD. */
-const tashkentToday = () => new Date(Date.now() + 5 * 3600_000).toISOString().slice(0, 10);
-
 const rubric = (n: number) => JSON.stringify({ completeness: n, pronunciation: n, grammar: n, fluency: n });
 
 describe('0004 gamification', () => {
@@ -56,12 +53,14 @@ describe('0004 gamification', () => {
       const days = await q(`select to_char(day, 'YYYY-MM-DD') as day, xp from public.daily_activity where student_id = $1`, [
         student,
       ]);
-      return { first: first.ok, second: second.ok, events, days };
+      // "today" from the database clock of this same transaction (now() is fixed per transaction)
+      const [today] = await q(`select to_char((now() at time zone 'Asia/Tashkent')::date, 'YYYY-MM-DD') as day`);
+      return { first: first.ok, second: second.ok, events, days, today: today.day as string };
     });
     expect(results.first).toBe(true);
     expect(results.second).toBe(false);
     expect(results.events).toEqual([{ amount: 10 }]);
-    expect(results.days).toEqual([{ day: tashkentToday(), xp: 10 }]);
+    expect(results.days).toEqual([{ day: results.today, xp: 10 }]);
   });
 
   it('an XP event at 23:30 UTC is booked on the next Tashkent day', async () => {

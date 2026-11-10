@@ -242,3 +242,8 @@ create policy student_achievements_select on public.student_achievements for sel
     or student_id in (select public.curated_student_ids())
     or student_id in (select public.taught_student_ids())
   );
+
+-- ---------------------------------------------------------------------------
+-- API roles never truncate, add triggers to, or reference tables directly.
+-- ---------------------------------------------------------------------------
+revoke truncate, trigger, references on all tables in schema public from anon, authenticated;

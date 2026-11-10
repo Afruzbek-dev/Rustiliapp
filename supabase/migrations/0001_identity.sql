@@ -154,13 +154,17 @@ language sql stable security definer set search_path = public as $$
   where g.curator_id = auth.uid() and public.is_curator_role()
 $$;
 
--- Students in the caller's curator groups.
+-- Current students in the caller's curator groups: pending or active, not expired.
+-- Rejected/expired (ex-)students drop out, so their profiles stop being readable.
 create function public.curated_student_ids() returns setof uuid
 language sql stable security definer set search_path = public as $$
   select distinct e.student_id
   from public.enrollments e
   join public.curator_groups g on g.id = e.curator_group_id
-  where g.curator_id = auth.uid() and public.is_curator_role()
+  where g.curator_id = auth.uid()
+    and public.is_curator_role()
+    and e.status in ('pending', 'active')
+    and (e.expires_at is null or e.expires_at > now())
 $$;
 
 -- Cohorts / courses the caller curates a group in.
@@ -187,6 +191,32 @@ language sql stable security definer set search_path = public as $$
   where public.teaches_course(c.course_id)
 $$;
 
+-- Curators of groups in cohorts of courses the caller teaches; all curators for admins.
+create function public.taught_curator_ids() returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select distinct g.curator_id
+  from public.curator_groups g
+  join public.cohorts c on c.id = g.cohort_id
+  where g.curator_id is not null
+    and public.teaches_course(c.course_id)
+$$;
+
+-- These helpers only serve RLS policies for signed-in users (and server code).
+revoke execute on function
+  public.app_role(), public.is_staff(), public.is_admin(), public.teaches_course(uuid),
+  public.teaches_cohort(uuid), public.active_course_ids(), public.active_cohort_ids(),
+  public.is_curator_role(), public.curated_group_ids(), public.curated_student_ids(),
+  public.curated_cohort_ids(), public.curated_course_ids(), public.taught_student_ids(),
+  public.taught_curator_ids()
+  from public, anon;
+grant execute on function
+  public.app_role(), public.is_staff(), public.is_admin(), public.teaches_course(uuid),
+  public.teaches_cohort(uuid), public.active_course_ids(), public.active_cohort_ids(),
+  public.is_curator_role(), public.curated_group_ids(), public.curated_student_ids(),
+  public.curated_cohort_ids(), public.curated_course_ids(), public.taught_student_ids(),
+  public.taught_curator_ids()
+  to authenticated, service_role;
+
 -- ---------------------------------------------------------------------------
 -- RLS
 -- ---------------------------------------------------------------------------
@@ -207,7 +237,11 @@ create policy profiles_select on public.profiles
   for select to authenticated
   using (
     id = auth.uid()
-    or public.is_staff()
+    or public.is_admin()
+    -- teachers: students (any status, so pending applicants too) and curators of own courses
+    or id in (select public.taught_student_ids())
+    or id in (select public.taught_curator_ids())
+    -- curators: current students of their groups
     or id in (select public.curated_student_ids())
   );
 
@@ -308,3 +342,8 @@ create policy enrollments_delete on public.enrollments
 -- login_nonces --------------------------------------------------------------
 -- Service role only: no policies, and no privileges for API roles.
 revoke all on public.login_nonces from anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- API roles never truncate, add triggers to, or reference tables directly.
+-- ---------------------------------------------------------------------------
+revoke truncate, trigger, references on all tables in schema public from anon, authenticated;

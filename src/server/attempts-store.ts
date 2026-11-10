@@ -47,13 +47,22 @@ export function createSupabaseAttemptStore(user: SupabaseClient, service: Supaba
       return data ? data.answer : null;
     },
 
+    async isTestItem(exerciseId) {
+      const { data, error } = await service.from("test_items").select("test_id").eq("exercise_id", exerciseId).limit(1);
+      fail("isTestItem", error);
+      return (data ?? []).length > 0;
+    },
+
+    // Aggregated in SQL (migration 0006): PostgREST max-rows must never truncate these.
     async countPriorAttempts(studentId, exerciseId, itemId) {
-      let q = service.from("attempts").select("is_correct").eq("student_id", studentId).eq("exercise_id", exerciseId);
-      if (itemId !== null) q = q.eq("answer->>itemId", itemId);
-      const { data, error } = await q;
+      const { data, error } = await service.rpc("attempt_stats", {
+        p_student: studentId,
+        p_exercise: exerciseId,
+        p_item: itemId,
+      });
       fail("countPriorAttempts", error);
-      const rows = data ?? [];
-      return { total: rows.length, correct: rows.filter((r) => r.is_correct).length };
+      const row = (Array.isArray(data) ? data[0] : data) as { total?: number | string; correct?: number | string } | null;
+      return { total: Number(row?.total ?? 0), correct: Number(row?.correct ?? 0) };
     },
 
     async insertAttempt(studentId, exerciseId, answer, isCorrect) {
@@ -97,18 +106,12 @@ export function createSupabaseAttemptStore(user: SupabaseClient, service: Supaba
       return out;
     },
 
-    async getCorrectRefs(studentId, exerciseIds) {
-      if (exerciseIds.length === 0) return [];
-      const { data, error } = await service
-        .from("attempts")
-        .select("exercise_id, answer")
-        .eq("student_id", studentId)
-        .eq("is_correct", true)
-        .in("exercise_id", exerciseIds);
+    async getCorrectRefs(studentId, partId) {
+      const { data, error } = await service.rpc("correct_refs", { p_student: studentId, p_part: partId });
       fail("getCorrectRefs", error);
-      return (data ?? []).map((r) => ({
-        exerciseId: r.exercise_id as string,
-        itemId: typeof (r.answer as { itemId?: unknown })?.itemId === "string" ? (r.answer as { itemId: string }).itemId : null,
+      return ((data ?? []) as { exercise_id: string; item_id: string | null }[]).map((r) => ({
+        exerciseId: r.exercise_id,
+        itemId: r.item_id ?? null,
       }));
     },
 

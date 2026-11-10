@@ -9,7 +9,10 @@ export interface VisibleExercise {
   id: string;
   type: string;
   checkMode: "auto" | "review";
-  /** Lesson part of the exercise's block (null for test-only exercises). */
+  /**
+   * Lesson part of the exercise's block. null when the exercise has no block (test-only) or the
+   * block is not readable by the student; such exercises are never attemptable here.
+   */
   partId: string | null;
 }
 
@@ -18,6 +21,8 @@ export interface AttemptStore extends ProgressStore {
   getRole(userId: string): Promise<string | null>;
   /** USER-scoped read: null unless RLS lets this student see the (published, own-course) exercise. */
   getVisibleExercise(exerciseId: string): Promise<VisibleExercise | null>;
+  /** SERVICE read: is the exercise an item of ANY test? Test items are graded by the test flow only. */
+  isTestItem(exerciseId: string): Promise<boolean>;
   /** SERVICE read of exercise_keys.answer. Never returned to clients. */
   getKey(exerciseId: string): Promise<unknown | null>;
   /** Earlier attempts of this student for the ref (itemId null = whole exercise). */
@@ -48,12 +53,13 @@ export class AttemptError extends Error {
 // Input validation (before check(), which trusts shapes)
 // ---------------------------------------------------------------------------------------------
 const str = z.string().max(1000);
+const itemIdStr = z.string().max(64);
 export const answerSchemas: Record<CheckableType, z.ZodType<AnswerMap[CheckableType]>> = {
-  classify: z.object({ itemId: str, bucketId: str }).strict(),
-  fill_blank: z.object({ itemId: str, value: str }).strict(),
+  classify: z.object({ itemId: itemIdStr, bucketId: str }).strict(),
+  fill_blank: z.object({ itemId: itemIdStr, value: str }).strict(),
   conjugate: z.object({ forms: z.array(str).length(6) }).strict(),
-  choose: z.object({ itemId: str, index: z.number().int().min(0).max(1000) }).strict(),
-  match: z.object({ pairs: z.array(z.tuple([str, str])).max(100) }).strict(),
+  choose: z.object({ itemId: itemIdStr, index: z.number().int().min(0).max(1000) }).strict(),
+  match: z.object({ pairs: z.array(z.tuple([str, str])).max(50) }).strict(),
 };
 
 const keySchemas: Record<CheckableType, z.ZodTypeAny> = {
@@ -81,14 +87,16 @@ const PER_ITEM_TYPES = new Set<string>(["classify", "fill_blank", "choose"]);
 
 /**
  * XP rule (ref = exerciseId for whole-exercise types, exerciseId:itemId for per-item types):
- *  - a correct attempt on a ref that already has a correct attempt pays 0 (ref already paid);
- *  - the first correct attempt on a ref with NO earlier attempt pays EXERCISE_FIRST (10);
- *  - the first correct attempt on a ref whose earlier attempts were all wrong pays EXERCISE_RETRY (5).
- * So a ref pays out at most once; award_xp is additionally idempotent per (student, reason, ref),
- * and xpAwarded reflects whether the ledger really granted it (concurrent requests can't double-pay).
+ *  - a correct attempt on a ref with NO earlier attempt offers EXERCISE_FIRST (10);
+ *  - a correct attempt on a ref with any earlier attempt offers EXERCISE_RETRY (5);
+ *  - award_xp is ALWAYS called on a correct answer. The ledger is unique per (student, reason, ref),
+ *    so a ref pays out once whatever we offer; a later correct attempt on an already-paid ref
+ *    yields 0 because award_xp reports "not granted". This also self-heals: if an attempt row was
+ *    stored but award_xp failed, the next correct attempt still pays (nothing is skipped based on
+ *    attempt history). xpAwarded reflects what the ledger really granted, so concurrent
+ *    double-submits cannot double-pay.
  */
-export function xpForCorrect(prior: { total: number; correct: number }): number {
-  if (prior.correct > 0) return 0;
+export function xpForCorrect(prior: { total: number }): number {
   return prior.total === 0 ? EXERCISE_FIRST : EXERCISE_RETRY;
 }
 
@@ -101,7 +109,10 @@ export async function submitAttempt(
 
   // 1. User-scoped read: RLS decides visibility. Unknown / unpublished / foreign course -> 404.
   const exercise = await store.getVisibleExercise(exerciseId);
-  if (!exercise) throw new AttemptError(404, "not_found");
+  if (!exercise || exercise.partId === null) throw new AttemptError(404, "not_found");
+  // Items of a test (even one that also sits in a published block) are graded by the test flow only:
+  // checking them here would leak `expected` and pay exercise XP. Same indistinguishable 404.
+  if (await store.isTestItem(exerciseId)) throw new AttemptError(404, "not_found");
   if (exercise.checkMode !== "auto" || !isCheckableType(exercise.type)) {
     throw new AttemptError(400, "not_checkable");
   }
@@ -120,6 +131,10 @@ export async function submitAttempt(
   const result = check(type as ExerciseType, keyParsed.data as KeyMap[ExerciseType], answer as never);
 
   const itemId = PER_ITEM_TYPES.has(type) ? (answer as { itemId: string }).itemId : null;
+  // An itemId that is not part of the key is rejected BEFORE anything is stored.
+  if (itemId !== null && !Object.prototype.hasOwnProperty.call(keyParsed.data, itemId)) {
+    throw new AttemptError(400, "invalid_answer");
+  }
   const ref = itemId === null ? exerciseId : `${exerciseId}:${itemId}`;
 
   // Prior attempts are counted BEFORE inserting this one.
@@ -131,7 +146,7 @@ export async function submitAttempt(
   let partCompleted: boolean | undefined;
   if (result.correct) {
     const amount = xpForCorrect(prior);
-    if (amount > 0 && (await store.awardXp(studentId, amount, "exercise_correct", ref))) xpAwarded += amount;
+    if (await store.awardXp(studentId, amount, "exercise_correct", ref)) xpAwarded += amount;
     if (exercise.partId) {
       const part = await completePart(store, studentId, exercise.partId);
       xpAwarded += part.xpAwarded;
@@ -167,7 +182,29 @@ export async function handleAttemptRequest(
     });
     return { status: 200, json: { ...result } };
   } catch (e) {
-    if (e instanceof AttemptError) return { status: e.status, json: { error: e.code } };
+    if (e instanceof AttemptError) {
+      if (e.status === 500) console.error("attempts: failed", e.code);
+      return { status: e.status, json: { error: e.code } };
+    }
+    // Log only the error class: messages may carry user data or answers.
+    console.error("attempts: internal error", e instanceof Error ? e.name : "unknown");
     return { status: 500, json: { error: "internal_error" } };
+  }
+}
+
+export const MAX_BODY_BYTES = 16 * 1024;
+
+/** Reads a JSON request body with a hard size cap. 413 when too large, 400 when not valid JSON. */
+export async function readJsonBody(
+  request: Request,
+): Promise<{ ok: true; body: unknown } | { ok: false; status: 400 | 413 }> {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return { ok: false, status: 413 };
+  const text = await request.text();
+  if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) return { ok: false, status: 413 };
+  try {
+    return { ok: true, body: JSON.parse(text) as unknown };
+  } catch {
+    return { ok: false, status: 400 };
   }
 }

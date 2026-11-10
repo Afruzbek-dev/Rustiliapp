@@ -1,7 +1,8 @@
 import { PART_COMPLETED } from "@/lib/gamification/xp";
 
-/** Exercise types that `check()` can grade. Other `auto` types (arrange, listen_pick) have no
- * checker yet, so they cannot gate part completion (they would block it forever). */
+/** Exercise types that `check()` can grade. `arrange` / `listen_pick` are NOT in MVP scope: they have
+ * no checker, /api/attempts answers 400 not_checkable for them, and completePart ignores them (they
+ * would otherwise block completion forever). The lesson editor (Task 26) must not offer these types. */
 export const CHECKABLE_TYPES = ["classify", "fill_blank", "conjugate", "choose", "match"] as const;
 export type CheckableType = (typeof CHECKABLE_TYPES)[number];
 
@@ -21,8 +22,8 @@ export interface PartExercise {
 export interface ProgressStore {
   /** Exercises in the part's PUBLISHED blocks. */
   getPartExercises(partId: string): Promise<PartExercise[]>;
-  /** Correct attempts of the student on these exercises, as (exerciseId, itemId|null). */
-  getCorrectRefs(studentId: string, exerciseIds: string[]): Promise<{ exerciseId: string; itemId: string | null }[]>;
+  /** Distinct correct refs (exerciseId, itemId|null) of the student in the part's published blocks. */
+  getCorrectRefs(studentId: string, partId: string): Promise<{ exerciseId: string; itemId: string | null }[]>;
   /** Exercise ids (of those given) the student has at least one submission for. */
   getSubmittedExerciseIds(studentId: string, exerciseIds: string[]): Promise<string[]>;
   /** Insert part_progress(in_progress) if absent. */
@@ -49,6 +50,8 @@ function requiredItems(type: string, key: unknown): (string | null)[] {
  *    for per-item types (classify/fill_blank/choose) EVERY item of the key needs a correct attempt;
  *  - every `review` exercise (speaking/open_text) has at least one submission (grading not required).
  * Then part_progress -> completed and award_xp(PART_COMPLETED, 'part_completed', partId).
+ * Parts with review exercises complete from the submission flows (Tasks 20/21 call this right after
+ * a submission is stored), because attempts alone never trigger it for them.
  * Idempotent: the XP ledger pays once per (student, reason, partId) and the status flips once.
  * Returns whether the part is complete and how much XP this call granted.
  */
@@ -62,10 +65,7 @@ export async function completePart(
   const review = exercises.filter((e) => e.checkMode === "review");
   if (auto.length + review.length === 0) return { completed: false, newlyCompleted: false, xpAwarded: 0 };
 
-  const correct = await store.getCorrectRefs(
-    studentId,
-    auto.map((e) => e.id),
-  );
+  const correct = await store.getCorrectRefs(studentId, partId);
   const done = new Set(correct.map((c) => `${c.exerciseId}\u0000${c.itemId ?? ""}`));
   for (const e of auto) {
     for (const item of requiredItems(e.type, e.key)) {

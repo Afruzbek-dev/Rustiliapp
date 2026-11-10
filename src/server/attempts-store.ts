@@ -121,6 +121,8 @@ export function createSupabaseAttemptStore(user: SupabaseClient, service: Supaba
         .from("submissions")
         .select("exercise_id")
         .eq("student_id", studentId)
+        // an audio upload that was never completed (storage_path still null) is not a submission
+        .or("kind.neq.audio,storage_path.not.is.null")
         .in("exercise_id", exerciseIds);
       fail("getSubmittedExerciseIds", error);
       return [...new Set((data ?? []).map((r) => r.exercise_id as string))];

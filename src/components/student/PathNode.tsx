@@ -74,9 +74,13 @@ export function PathNode({
         : "bg-card text-ink border-2 border-ink shadow-[0_5px_0_var(--ink)]";
   const size = current ? "size-24" : "size-[4.5rem]";
   const day = currentDay ?? 1;
-  const name = [title, subtitle, stateLabel[status], current ? `${day}-kun` : null]
+  const dayStates = days && days.length > 0 ? days.map((d) => `${d.label}: ${stateLabel[d.status]}`).join(", ") : null;
+  const name = [
+    [title, subtitle, stateLabel[status], current ? `${day}-kun` : null].filter(Boolean).join(", "),
+    dayStates,
+  ]
     .filter(Boolean)
-    .join(", ");
+    .join("; ");
   const tileClass = `relative flex ${size} shrink-0 items-center justify-center rounded-full transition-transform duration-150 motion-reduce:transition-none ${tile} ${
     locked ? "" : "active:translate-y-[3px] motion-reduce:active:translate-y-0"
   }`;

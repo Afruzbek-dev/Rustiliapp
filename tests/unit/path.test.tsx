@@ -100,7 +100,7 @@ describe("getPath", () => {
   });
 
   it("module test unlocks only when every lesson of the module is completed", async () => {
-    const tests: TestRow[] = [{ id: "t1", title: "Test 1", after_module_id: "m1" }];
+    const tests: TestRow[] = [{ id: "t1", title: "Test 1", after_module_id: "m1", published: true }];
     const done: Record<string, PartProgress> = { l1g: "completed", l1c: "completed", l2g: "completed" };
     const locked = await getPathWith(fakeDb({ modules, published: all, progress: done, tests }), "s1");
     expect(locked.modules[0].test?.status).toBe("locked");
@@ -111,6 +111,24 @@ describe("getPath", () => {
     );
     expect(open.modules[0].test).toEqual({ id: "t1", title: "Test 1", status: "available" });
     expect(open.modules[0].completedLessons).toBe(2);
+  });
+
+  it("module 2's first part unlocks once module 1's last part is completed (sequence is course-wide)", async () => {
+    const done: Record<string, PartProgress> = { l1g: "completed", l1c: "completed", l2g: "completed" };
+    const before = await getPathWith(fakeDb({ modules, published: all, progress: { ...done } }), "s1");
+    expect(before.modules[1].lessons[0].status).toBe("locked");
+    const after = await getPathWith(
+      fakeDb({ modules, published: all, progress: { ...done, l2c: "completed" } }),
+      "s1",
+    );
+    expect(after.modules[1].lessons[0].status).toBe("available");
+    expect(after.modules[1].lessons[0].continuePartId).toBe("l3g");
+  });
+
+  it("an unpublished tests row does not produce a test node", async () => {
+    const tests: TestRow[] = [{ id: "t9", title: "Draft", after_module_id: "m1", published: false }];
+    const p = await getPathWith(fakeDb({ modules, published: all, tests }), "s1");
+    expect(p.modules.every((m) => m.test === null)).toBe(true);
   });
 
   it("empty course or no enrollment gives no modules", async () => {
@@ -140,6 +158,24 @@ describe("PathNode", () => {
     expect(screen.getByText("Davom etish · 2-kun")).toBeInTheDocument();
     const link = screen.getByRole("link", { name: /Урок 3.*davom etmoqda.*2-kun/ });
     expect(link).toHaveAttribute("href", "/lesson/p1");
+  });
+
+  it("announces per-day states in the accessible name", () => {
+    render(
+      <PathNode
+        title="Урок 3"
+        status="in_progress"
+        href="/lesson/p1"
+        currentDay={2}
+        days={[
+          { label: "Grammatika", status: "completed" },
+          { label: "Razgovor", status: "available" },
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("link", { name: /Grammatika: tugallangan, Razgovor: ochiq/ }),
+    ).toBeInTheDocument();
   });
 
   it("available non-current test node is a link; locked test node is a button", () => {

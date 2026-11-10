@@ -67,6 +67,7 @@ export interface TestRow {
   id: string;
   title: string;
   after_module_id: string | null;
+  published: boolean;
 }
 
 /** Narrow data port; production adapter below, tests inject an in-memory fake. */
@@ -76,7 +77,7 @@ export interface PathDb {
   /** Ids (of the given parts) that have at least one published block. */
   publishedPartIds(partIds: string[]): Promise<Set<string>>;
   progress(studentId: string): Promise<Map<string, PartProgress>>;
-  /** Published tests of the course. */
+  /** Tests of the course (RLS already hides unpublished ones; `published` is re-checked). */
   tests(courseId: string): Promise<TestRow[]>;
 }
 
@@ -132,7 +133,7 @@ export async function getPathWith(db: PathDb, studentId: string, now: Date = new
           continuePartId: cont?.id ?? null,
         };
       });
-    const test = tests.find((t) => t.after_module_id === m.id);
+    const test = tests.find((t) => t.published && t.after_module_id === m.id);
     return {
       id: m.id,
       position: m.position,
@@ -172,11 +173,12 @@ export function supabasePathDb(sb: Sb): PathDb {
     },
 
     async publishedPartIds(partIds) {
-      const data = ok<{ lesson_part_id: string }[] | null>(
-        await sb.from("blocks").select("lesson_part_id").eq("published", true).in("lesson_part_id", partIds),
-        "blocks",
+      // Distinct ids computed in SQL: one row per block would hit PostgREST's row cap.
+      const data = ok<string[] | null>(
+        await sb.rpc("published_part_ids", { p_part_ids: partIds }),
+        "published parts",
       );
-      return new Set((data ?? []).map((b) => b.lesson_part_id));
+      return new Set(data ?? []);
     },
 
     async progress(studentId) {
@@ -191,9 +193,8 @@ export function supabasePathDb(sb: Sb): PathDb {
       const data = ok<TestRow[] | null>(
         await sb
           .from("tests")
-          .select("id, title, after_module_id")
-          .eq("course_id", courseId)
-          .eq("published", true),
+          .select("id, title, after_module_id, published")
+          .eq("course_id", courseId),
         "tests",
       );
       return data ?? [];

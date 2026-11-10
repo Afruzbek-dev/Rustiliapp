@@ -9,7 +9,7 @@ export default async function StudentLayout({ children }: { children: ReactNode 
   const { user } = await requireStudent();
   const speakHref = await getSpeakHref(user.id);
   return (
-    <div className="min-h-dvh pb-24">
+    <div className="min-h-dvh pb-[calc(4.5rem+env(safe-area-inset-bottom))]">
       <div className="mx-auto w-full max-w-xl">{children}</div>
       <BottomNav speakHref={speakHref} />
     </div>

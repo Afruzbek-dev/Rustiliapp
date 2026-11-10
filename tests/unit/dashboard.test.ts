@@ -14,7 +14,7 @@ function fakeDb(over: Partial<{
   name: string;
   activity: ActivityRow[];
   xp: number;
-  rank: number | null;
+  rank: { rank: number; score: number } | null;
   part: CurrentPart | null;
   due: number;
   enrolled: boolean;
@@ -22,7 +22,7 @@ function fakeDb(over: Partial<{
   const o = { name: "Aziza Karimova", activity: [], xp: 0, rank: null, part: null, due: 0, enrolled: true, ...over };
   return {
     fullName: async () => o.name,
-    enrollment: async () => (o.enrolled ? { cohortId: "c1", label: "Guruh A" } : null),
+    enrollment: async () => (o.enrolled ? { cohortId: "c1", courseId: "k1", label: "Guruh A" } : null),
     activity: async () => o.activity,
     totalXp: async () => o.xp,
     weeklyRank: async () => o.rank,
@@ -60,7 +60,7 @@ describe("getDashboardWith", () => {
           { day: "2026-11-07", xp: 0, tasks: {} },
         ],
         xp: 70,
-        rank: 3,
+        rank: { rank: 3, score: 40 },
         due: 5,
       }),
       "s1",
@@ -133,8 +133,30 @@ describe("getDashboardWith", () => {
     expect(d.currentPart).toEqual(part);
   });
 
+  it("shows no rank when the weekly score is 0 (tied at rank 1)", async () => {
+    const d = await getDashboardWith(
+      fakeDb({ xp: 5, activity: [{ day: "2026-11-01", xp: 5, tasks: {} }], rank: { rank: 1, score: 0 } }),
+      "s1",
+      NOW,
+    );
+    expect(d.weeklyRank).toBeNull();
+  });
+
+  it("passes the resolved enrollment's course to currentPart", async () => {
+    const seen: string[] = [];
+    const db: DashboardDb = {
+      ...fakeDb(),
+      currentPart: async (_s, courseId) => {
+        seen.push(courseId);
+        return null;
+      },
+    };
+    await getDashboardWith(db, "s1", NOW);
+    expect(seen).toEqual(["k1"]);
+  });
+
   it("skips the rank lookup without an enrollment", async () => {
-    const d = await getDashboardWith(fakeDb({ enrolled: false, rank: 1 }), "s1", NOW);
+    const d = await getDashboardWith(fakeDb({ enrolled: false, rank: { rank: 1, score: 10 } }), "s1", NOW);
     expect(d.weeklyRank).toBeNull();
     expect(d.groupLabel).toBeNull();
   });

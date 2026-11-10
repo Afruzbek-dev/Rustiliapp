@@ -16,6 +16,13 @@ export interface ActivityRow {
   tasks: Record<string, unknown> | null;
 }
 
+export interface CurrentEnrollment {
+  cohortId: string;
+  courseId: string;
+  /** Group name, else cohort name. */
+  label: string;
+}
+
 export interface CurrentPart {
   partId: string;
   lessonTitle: string;
@@ -32,14 +39,18 @@ export interface CurrentPart {
  */
 export interface DashboardDb {
   fullName(studentId: string): Promise<string>;
-  /** Active enrollment: cohort id and a display label (group name, else cohort name). */
-  enrollment(studentId: string): Promise<{ cohortId: string; label: string } | null>;
+  /**
+   * The student's current enrollment, resolved once per request with the same rule as
+   * requireStudent (active, not expired), newest approval first.
+   */
+  enrollment(studentId: string, nowIso: string): Promise<CurrentEnrollment | null>;
   /** Days with activity, newest first. */
   activity(studentId: string): Promise<ActivityRow[]>;
+  /** Lifetime XP of the signed-in student (summed in SQL). */
   totalXp(studentId: string): Promise<number>;
-  /** Rank in the cohort's weekly XP leaderboard, or null if absent. */
-  weeklyRank(cohortId: string, studentId: string): Promise<number | null>;
-  currentPart(studentId: string): Promise<CurrentPart | null>;
+  /** Row in the cohort's weekly XP leaderboard, or null if absent. */
+  weeklyRank(cohortId: string, studentId: string): Promise<{ rank: number; score: number } | null>;
+  currentPart(studentId: string, courseId: string): Promise<CurrentPart | null>;
   dueCards(studentId: string, nowIso: string): Promise<number>;
 }
 
@@ -105,15 +116,18 @@ export async function getDashboardWith(
   now: Date = new Date(),
 ): Promise<Dashboard> {
   const today = tashkentDay(now);
-  const [fullName, enrollment, activity, totalXp, currentPart, dueCards] = await Promise.all([
+  const nowIso = now.toISOString();
+  const enrollment = await db.enrollment(studentId, nowIso);
+  const [fullName, activity, totalXp, currentPart, dueCards, rankRow] = await Promise.all([
     db.fullName(studentId),
-    db.enrollment(studentId),
     db.activity(studentId),
     db.totalXp(studentId),
-    db.currentPart(studentId),
-    db.dueCards(studentId, now.toISOString()),
+    enrollment ? db.currentPart(studentId, enrollment.courseId) : Promise.resolve(null),
+    db.dueCards(studentId, nowIso),
+    enrollment ? db.weeklyRank(enrollment.cohortId, studentId) : Promise.resolve(null),
   ]);
-  const weeklyRank = enrollment ? await db.weeklyRank(enrollment.cohortId, studentId) : null;
+  // A student with no XP this week is tied at rank 1 with everyone else; show no rank.
+  const weeklyRank = rankRow && rankRow.score > 0 ? rankRow.rank : null;
 
   const activeDays = new Set(activity.filter((a) => a.xp > 0).map((a) => a.day));
   const todayRow = activity.find((a) => a.day === today);
@@ -136,79 +150,90 @@ export async function getDashboardWith(
   };
 }
 
+/** Surface any PostgREST error so error.tsx renders instead of misleading zeros. */
+type Row = Record<string, unknown>;
+function ok<T = Row[]>(res: { data: unknown; error: { message: string } | null }, what: string): T | null {
+  if (res.error) throw new Error(`dashboard: ${what}: ${res.error.message}`);
+  return res.data as T | null;
+}
+
+const one = <T>(v: T | T[] | null | undefined): T | null => (Array.isArray(v) ? (v[0] ?? null) : (v ?? null));
+
 type Sb = Awaited<ReturnType<typeof createClient>>;
 
 export function supabaseDashboardDb(sb: Sb): DashboardDb {
   return {
     async fullName(studentId) {
-      const { data, error } = await sb.from("profiles").select("full_name").eq("id", studentId).maybeSingle();
-      if (error) throw error;
+      const data = ok<{ full_name: string }>(
+        await sb.from("profiles").select("full_name").eq("id", studentId).maybeSingle(),
+        "profile",
+      );
       return data?.full_name ?? "";
     },
 
-    async enrollment(studentId) {
-      const { data, error } = await sb
-        .from("enrollments")
-        .select("cohort_id, cohorts(name), curator_groups(name)")
-        .eq("student_id", studentId)
-        .eq("status", "active")
-        .limit(1)
-        .maybeSingle();
-      if (error) throw error;
+    async enrollment(studentId, nowIso) {
+      const data = ok<{ cohort_id: string; cohorts: unknown; curator_groups: unknown }>(
+        await sb
+          .from("enrollments")
+          .select("cohort_id, cohorts(name, course_id), curator_groups(name)")
+          .eq("student_id", studentId)
+          .eq("status", "active")
+          .or(`expires_at.is.null,expires_at.gt.${nowIso}`)
+          .order("approved_at", { ascending: false, nullsFirst: false })
+          .order("id", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        "enrollment",
+      );
       if (!data) return null;
-      const one = <T>(v: T | T[] | null): T | null => (Array.isArray(v) ? (v[0] ?? null) : v);
+      type Cohort = { name: string; course_id: string };
       const group = one(data.curator_groups as { name: string } | { name: string }[] | null);
-      const cohort = one(data.cohorts as { name: string } | { name: string }[] | null);
-      return { cohortId: data.cohort_id as string, label: group?.name ?? cohort?.name ?? "" };
+      const cohort = one(data.cohorts as Cohort | Cohort[] | null);
+      if (!cohort) return null;
+      return {
+        cohortId: data.cohort_id as string,
+        courseId: cohort.course_id,
+        label: group?.name ?? cohort.name ?? "",
+      };
     },
 
     async activity(studentId) {
-      const { data, error } = await sb
-        .from("daily_activity")
-        .select("day, xp, tasks")
-        .eq("student_id", studentId)
-        .order("day", { ascending: false })
-        .limit(400);
-      if (error) throw error;
-      return (data ?? []) as ActivityRow[];
+      const data = ok(
+        await sb
+          .from("daily_activity")
+          .select("day, xp, tasks")
+          .eq("student_id", studentId)
+          .order("day", { ascending: false })
+          .limit(400),
+        "activity",
+      );
+      return (data ?? []) as unknown as ActivityRow[];
     },
 
-    async totalXp(studentId) {
-      const { data, error } = await sb.from("xp_events").select("amount").eq("student_id", studentId);
-      if (error) throw error;
-      return (data ?? []).reduce((s, r) => s + (r.amount as number), 0);
+    async totalXp() {
+      const data = ok<unknown>(await sb.rpc("my_total_xp"), "total xp");
+      return Number(data ?? 0);
     },
 
     async weeklyRank(cohortId, studentId) {
-      const { data, error } = await sb.rpc("leaderboard", {
-        p_cohort: cohortId,
-        p_kind: "xp",
-        p_period: "week",
-      });
-      if (error) throw error;
-      const row = ((data ?? []) as { rank: number; student_id: string }[]).find(
+      const data = ok<unknown>(
+        await sb.rpc("leaderboard", { p_cohort: cohortId, p_kind: "xp", p_period: "week" }),
+        "leaderboard",
+      );
+      const row = ((data ?? []) as { rank: number; student_id: string; score: number | string }[]).find(
         (r) => r.student_id === studentId,
       );
-      return row?.rank ?? null;
+      return row ? { rank: row.rank, score: Number(row.score) } : null;
     },
 
-    async currentPart(studentId) {
-      const { data: enr } = await sb
-        .from("enrollments")
-        .select("cohorts(course_id)")
-        .eq("student_id", studentId)
-        .eq("status", "active")
-        .limit(1)
-        .maybeSingle();
-      const cohorts = enr?.cohorts as { course_id: string } | { course_id: string }[] | null | undefined;
-      const courseId = Array.isArray(cohorts) ? cohorts[0]?.course_id : cohorts?.course_id;
-      if (!courseId) return null;
-
-      const { data: modules, error } = await sb
-        .from("modules")
-        .select("position, lessons(position, title, lesson_parts(id, position, kind))")
-        .eq("course_id", courseId);
-      if (error) throw error;
+    async currentPart(studentId, courseId) {
+      const modules = ok(
+        await sb
+          .from("modules")
+          .select("position, lessons(position, title, lesson_parts(id, position, kind))")
+          .eq("course_id", courseId),
+        "modules",
+      );
 
       type Part = { id: string; position: number; kind: "grammar" | "conversation"; lessonTitle: string };
       const parts: (Part & { order: number })[] = [];
@@ -228,11 +253,10 @@ export function supabaseDashboardDb(sb: Sb): DashboardDb {
       }
       if (parts.length === 0) return null;
 
-      const { data: prog, error: pe } = await sb
-        .from("part_progress")
-        .select("lesson_part_id, status")
-        .eq("student_id", studentId);
-      if (pe) throw pe;
+      const prog = ok(
+        await sb.from("part_progress").select("lesson_part_id, status").eq("student_id", studentId),
+        "part progress",
+      );
       const progress = new Map<string, PartProgress>(
         (prog ?? []).map((r) => [r.lesson_part_id as string, r.status as PartProgress]),
       );
@@ -241,25 +265,31 @@ export function supabaseDashboardDb(sb: Sb): DashboardDb {
       const current = sorted.find((p) => statuses.get(p.id) !== "completed");
       if (!current) return null;
 
-      const { data: blocks } = await sb
-        .from("blocks")
-        .select("id")
-        .eq("lesson_part_id", current.id)
-        .eq("type", "exercise")
-        .eq("published", true);
+      const blocks = ok(
+        await sb
+          .from("blocks")
+          .select("id")
+          .eq("lesson_part_id", current.id)
+          .eq("type", "exercise")
+          .eq("published", true),
+        "blocks",
+      );
       const blockIds = (blocks ?? []).map((b) => b.id as string);
       let percent = 0;
       if (blockIds.length > 0) {
-        const { data: exs } = await sb.from("exercises").select("id").in("block_id", blockIds);
+        const exs = ok(await sb.from("exercises").select("id").in("block_id", blockIds), "exercises");
         const exIds = (exs ?? []).map((e) => e.id as string);
         if (exIds.length > 0) {
-          const { data: ok } = await sb
-            .from("attempts")
-            .select("exercise_id")
-            .eq("student_id", studentId)
-            .eq("is_correct", true)
-            .in("exercise_id", exIds);
-          const solved = new Set((ok ?? []).map((a) => a.exercise_id as string));
+          const solvedRows = ok(
+            await sb
+              .from("attempts")
+              .select("exercise_id")
+              .eq("student_id", studentId)
+              .eq("is_correct", true)
+              .in("exercise_id", exIds),
+            "attempts",
+          );
+          const solved = new Set((solvedRows ?? []).map((a) => a.exercise_id as string));
           percent = Math.round((solved.size / exIds.length) * 100);
         }
       }
@@ -273,13 +303,13 @@ export function supabaseDashboardDb(sb: Sb): DashboardDb {
     },
 
     async dueCards(studentId, nowIso) {
-      const { count, error } = await sb
+      const res = await sb
         .from("srs_cards")
         .select("word_id", { count: "exact", head: true })
         .eq("student_id", studentId)
         .lte("due_at", nowIso);
-      if (error) throw error;
-      return count ?? 0;
+      if (res.error) throw new Error(`dashboard: due cards: ${res.error.message}`);
+      return res.count ?? 0;
     },
   };
 }
@@ -290,27 +320,34 @@ export async function getDashboard(studentId: string): Promise<Dashboard> {
   return getDashboardWith(supabaseDashboardDb(sb), studentId);
 }
 
-/** Target of the "Gapirish" tab: latest speaking exercise without a submission, else /path. */
+/**
+ * Target of the "Gapirish" tab: newest block-attached speaking exercise without a submission,
+ * else /path. Failures are logged and fall back to /path (the nav must never break the page).
+ */
 export async function getSpeakHref(studentId: string): Promise<string> {
   try {
     const sb = await createClient();
-    const { data: exs } = await sb
-      .from("exercises")
-      .select("id")
-      .eq("type", "speaking")
-      .order("created_at", { ascending: false })
-      .limit(50);
+    const exs = ok(
+      await sb
+        .from("exercises")
+        .select("id")
+        .eq("type", "speaking")
+        .not("block_id", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(50),
+      "speaking exercises",
+    );
     const ids = (exs ?? []).map((e) => e.id as string);
     if (ids.length === 0) return "/path";
-    const { data: subs } = await sb
-      .from("submissions")
-      .select("exercise_id")
-      .eq("student_id", studentId)
-      .in("exercise_id", ids);
+    const subs = ok(
+      await sb.from("submissions").select("exercise_id").eq("student_id", studentId).in("exercise_id", ids),
+      "submissions",
+    );
     const done = new Set((subs ?? []).map((s) => s.exercise_id as string));
     const open = ids.find((id) => !done.has(id));
     return open ? `/speak/${open}` : "/path";
-  } catch {
+  } catch (err) {
+    console.error("getSpeakHref failed", err instanceof Error ? err.message : "unknown error");
     return "/path";
   }
 }

@@ -158,7 +158,9 @@ describe('0001 identity RLS', () => {
     const peer = await createActiveStudent(a.cohort, group);
     const profiles = await withUser(student, (q) => q('select id from public.profiles'));
     expect(profiles.map((r) => r.id)).toEqual([student]);
-    expect(await withUser(student, (q) => q('select id from public.curator_groups'))).toEqual([]);
+    // Since 0012 the student reads only their OWN group (a.group), never the group they "curate".
+    const groups = await withUser(student, (q) => q('select id from public.curator_groups'));
+    expect(groups.map((r) => r.id)).toEqual([a.group]);
     expect(
       await withUser(student, (q) => q('select id from public.enrollments where student_id = $1', [peer])),
     ).toEqual([]);

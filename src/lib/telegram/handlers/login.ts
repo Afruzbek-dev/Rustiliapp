@@ -14,7 +14,9 @@ import {
   upsertProfile,
   type Db,
 } from "@/lib/telegram/api";
-import { confirmKeyboard, contactKeyboard } from "@/lib/telegram/keyboards";
+import { serverEnv } from "@/lib/env";
+import { confirmKeyboard, contactKeyboard, enrollmentKeyboard } from "@/lib/telegram/keyboards";
+import { ensurePendingEnrollment } from "@/server/enrollment";
 import { logBotError } from "@/lib/telegram/log";
 import { loginMatchCode } from "@/lib/telegram/match-code";
 
@@ -29,6 +31,7 @@ export const MSG = {
   badPhone: "Telefon raqami noto'g'ri formatda, ustozga murojaat qiling",
   phoneTaken: "Bu raqam boshqa akkauntga bog'langan, ustozga murojaat qiling",
   accountProblem: "Akkauntni ulashda muammo bor, ustozga murojaat qiling",
+  noCohort: "Hozircha ochiq guruh yo'q, ustozga murojaat qiling",
 } as const;
 
 const START_PREFIX = "login_";
@@ -99,6 +102,7 @@ export function registerLogin(bot: Bot, getDb: () => Db) {
     }
     const fullName = [from.first_name, from.last_name].filter(Boolean).join(" ");
     let createdUserId: string | null = null;
+    let profileId = "";
     try {
       const holder = await profileByPhone(db, phone);
       if (holder && holder.telegram_id !== from.id) {
@@ -107,6 +111,7 @@ export function registerLogin(bot: Bot, getDb: () => Db) {
       }
       const user = await ensureAuthUser(db, from.id, fullName);
       if (user.created) createdUserId = user.id;
+      profileId = user.id;
       await upsertProfile(db, {
         id: user.id,
         telegramId: from.id,
@@ -127,8 +132,20 @@ export function registerLogin(bot: Bot, getDb: () => Db) {
       }
       throw error;
     }
+    // A pending enrollment never grants content access (RLS requires active); staff approve it.
+    const enrollment = await ensurePendingEnrollment(db, profileId);
+    if (enrollment.created) {
+      try {
+        await ctx.api.sendMessage(serverEnv().TELEGRAM_STAFF_CHAT_ID, `Yangi o'quvchi: ${fullName}, ${phone}`, {
+          reply_markup: enrollmentKeyboard(enrollment.enrollment.id),
+        });
+      } catch (error) {
+        logBotError(error, ctx.update.update_id); // never fails the student's flow
+      }
+    }
     // The session is only released once the user presses the inline confirm button.
     await ctx.reply(MSG.received, { reply_markup: remove });
+    if (!enrollment.created && enrollment.reason === "no_cohort") await ctx.reply(MSG.noCohort);
     await ctx.reply(confirmText(pending.nonce, pending.created_at), {
       reply_markup: confirmKeyboard(pending.nonce),
     });

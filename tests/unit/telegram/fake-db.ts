@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Db } from "@/lib/telegram/api";
 
 type Row = Record<string, unknown>;
@@ -5,13 +6,27 @@ type Filter = (r: Row) => boolean;
 type AuthUser = { id: string; email: string; app_metadata: Record<string, unknown> };
 
 /** Minimal in-memory stand-in for the slice of the Supabase client the bot uses. */
-export function createFakeDb(seed: { login_nonces?: Row[]; profiles?: Row[]; authUsers?: AuthUser[] } = {}) {
+export function createFakeDb(
+  seed: {
+    login_nonces?: Row[];
+    profiles?: Row[];
+    authUsers?: AuthUser[];
+    courses?: Row[];
+    cohorts?: Row[];
+    curator_groups?: Row[];
+    enrollments?: Row[];
+  } = {},
+) {
   const tables: Record<string, Row[]> = {
     login_nonces: seed.login_nonces ?? [],
     profiles: seed.profiles ?? [],
+    courses: seed.courses ?? [],
+    cohorts: seed.cohorts ?? [],
+    curator_groups: seed.curator_groups ?? [],
+    enrollments: seed.enrollments ?? [],
   };
   const authUsers: AuthUser[] = seed.authUsers ?? [];
-  const calls = { createUser: 0, upsert: 0, deleteUser: 0 };
+  const calls = { createUser: 0, upsert: 0, deleteUser: 0, insert: 0 };
   const admin = {
     createUser: ({ email, app_metadata }: { email: string; app_metadata?: Record<string, unknown> }): Promise<unknown> => {
       calls.createUser++;
@@ -37,7 +52,7 @@ export function createFakeDb(seed: { login_nonces?: Row[]; profiles?: Row[]; aut
   function from(name: string) {
     const rows = tables[name]!;
     const filters: Filter[] = [];
-    let op: "select" | "update" | "upsert" | "delete" = "select";
+    let op: "select" | "update" | "upsert" | "delete" | "insert" = "select";
     let patch: Row = {};
     let order: { col: string; asc: boolean } | undefined;
     let max = Infinity;
@@ -54,6 +69,23 @@ export function createFakeDb(seed: { login_nonces?: Row[]; profiles?: Row[]; aut
         const hit = matches();
         hit.forEach((r) => rows.splice(rows.indexOf(r), 1));
         return { data: null, error: null };
+      }
+      if (op === "insert") {
+        if (name === "enrollments" && rows.some((r) => r.student_id === patch.student_id && r.cohort_id === patch.cohort_id)) {
+          return { data: null, error: { code: "23505", message: "duplicate key" } };
+        }
+        const row = {
+          id: randomUUID(),
+          curator_group_id: null,
+          approved_by: null,
+          approved_at: null,
+          expires_at: null,
+          created_at: new Date().toISOString(),
+          ...patch,
+        };
+        rows.push(row);
+        calls.insert++;
+        return { data: returning ? [{ ...row }] : null, error: null };
       }
       if (op === "upsert") {
         const existing = rows.find((r) => r.id === patch.id);
@@ -74,12 +106,21 @@ export function createFakeDb(seed: { login_nonces?: Row[]; profiles?: Row[]; aut
 
     const b: Record<string, unknown> = {
       select() {
-        if (op === "update") returning = true;
+        if (op === "update" || op === "insert") returning = true;
         return b;
       },
       update(p: Row) {
         op = "update";
         patch = p;
+        return b;
+      },
+      insert(p: Row) {
+        op = "insert";
+        patch = p;
+        return b;
+      },
+      neq(c: string, v: unknown) {
+        filters.push((r) => r[c] !== v);
         return b;
       },
       delete() {

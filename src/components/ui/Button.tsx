@@ -1,6 +1,8 @@
+"use client";
+
 import Link from "next/link";
 import { Loader2 } from "lucide-react";
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from "react";
 import { cn } from "./cn";
 
 export type ButtonVariant = "primary" | "secondary" | "success" | "danger" | "dark";
@@ -55,10 +57,21 @@ export function Button({
 
   if (href !== undefined) {
     const isDisabled = disabled || loading;
+    const { onClick, ...linkRest } = rest as unknown as {
+      onClick?: MouseEventHandler<HTMLAnchorElement>;
+    } & Record<string, unknown>;
     return (
       <Link
+        {...(linkRest as object)}
         href={href}
         className={classes}
+        onClick={(e) => {
+          if (isDisabled) {
+            e.preventDefault();
+            return;
+          }
+          onClick?.(e);
+        }}
         aria-busy={loading || undefined}
         aria-disabled={isDisabled || undefined}
         tabIndex={isDisabled ? -1 : undefined}

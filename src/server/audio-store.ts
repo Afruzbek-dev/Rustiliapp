@@ -55,29 +55,20 @@ export function createSupabaseAudioStore(user: SupabaseClient, service: Supabase
       return row ? { curatorGroupId: row.curator_group_id } : null;
     },
 
-    async countAudioSince(studentId, exerciseId, sinceIso) {
-      const { count, error } = await service
-        .from("submissions")
-        .select("id", { count: "exact", head: true })
-        .eq("student_id", studentId)
-        .eq("exercise_id", exerciseId)
-        .eq("kind", "audio")
-        .gte("created_at", sinceIso);
-      fail("countAudioSince", error);
-      return count ?? 0;
-    },
-
-    async insertAudioSubmission(row) {
-      const { error } = await service.from("submissions").insert({
-        id: row.id,
-        student_id: row.studentId,
-        exercise_id: row.exerciseId,
-        curator_group_id: row.curatorGroupId,
-        kind: "audio",
-        status: "pending",
-        storage_path: null,
+    async createAudioSubmission(row) {
+      const { data, error } = await service.rpc("create_audio_submission", {
+        p_student: row.studentId,
+        p_exercise: row.exerciseId,
+        p_group: row.curatorGroupId,
+        p_ext: row.ext,
       });
-      fail("insertAudioSubmission", error);
+      fail("createAudioSubmission", error);
+      const r = (Array.isArray(data) ? data[0] : data) as { submission_id: string | null; outcome: string } | null;
+      if (!r || r.outcome !== "ok" || !r.submission_id) {
+        if (r && (r.outcome === "rate_limited" || r.outcome === "too_many_incomplete")) return { limited: true };
+        throw new Error("createAudioSubmission: unexpected result");
+      }
+      return { submissionId: r.submission_id };
     },
 
     async createSignedUpload(path) {
@@ -89,7 +80,7 @@ export function createSupabaseAudioStore(user: SupabaseClient, service: Supabase
     async getSubmission(submissionId) {
       const { data, error } = await service
         .from("submissions")
-        .select("id, student_id, exercise_id, kind, storage_path")
+        .select("id, student_id, exercise_id, kind, storage_path, notified_at")
         .eq("id", submissionId)
         .maybeSingle();
       fail("getSubmission", error);
@@ -100,6 +91,7 @@ export function createSupabaseAudioStore(user: SupabaseClient, service: Supabase
         exerciseId: data.exercise_id as string,
         kind: data.kind as string,
         storagePath: (data.storage_path as string | null) ?? null,
+        notifiedAt: (data.notified_at as string | null) ?? null,
       };
     },
 
@@ -139,16 +131,26 @@ export function createSupabaseAudioStore(user: SupabaseClient, service: Supabase
       return (count ?? 0) > 0;
     },
 
-    async getExercisePartId(exerciseId) {
+    async getExerciseInfo(exerciseId) {
       const { data, error } = await service
         .from("exercises")
-        .select("blocks(lesson_part_id)")
+        .select("course_id, blocks(lesson_part_id)")
         .eq("id", exerciseId)
         .maybeSingle();
-      fail("getExercisePartId", error);
-      const blocks = data?.blocks as { lesson_part_id: string } | { lesson_part_id: string }[] | null | undefined;
+      fail("getExerciseInfo", error);
+      if (!data) return null;
+      const blocks = data.blocks as { lesson_part_id: string } | { lesson_part_id: string }[] | null | undefined;
       const block = Array.isArray(blocks) ? blocks[0] : blocks;
-      return block?.lesson_part_id ?? null;
+      return { partId: block?.lesson_part_id ?? null, courseId: data.course_id as string };
+    },
+
+    async markNotified(submissionId) {
+      const { error } = await service
+        .from("submissions")
+        .update({ notified_at: new Date().toISOString() })
+        .eq("id", submissionId)
+        .is("notified_at", null);
+      fail("markNotified", error);
     },
   };
 }

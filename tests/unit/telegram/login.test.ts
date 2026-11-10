@@ -30,7 +30,12 @@ type Sent = { method: string; payload: Record<string, unknown> };
 type Seed = Parameters<typeof createFakeDb>[0];
 
 function setup(nonces: Record<string, unknown>[], extra: Omit<Seed, "login_nonces"> = {}) {
-  const fake = createFakeDb({ login_nonces: nonces, ...extra });
+  const fake = createFakeDb({
+    login_nonces: nonces,
+    courses: [{ id: "course1", teacher_id: "t0" }],
+    cohorts: [{ id: "cohort1", course_id: "course1", starts_on: "2026-11-01", ends_on: null, access_until: null, created_at: "2026-10-01T00:00:00Z" }],
+    ...extra,
+  });
   const bot = createBot("123:TEST", () => fake.db, botInfo);
   const sent: Sent[] = [];
   bot.api.config.use((_prev, method, payload) => {
@@ -50,8 +55,11 @@ const nonceRow = (over: Record<string, unknown> = {}) => ({
   created_at: new Date().toISOString(),
   ...over,
 });
+// The staff chat (TELEGRAM_STAFF_CHAT_ID=2) is asserted separately in enrollment.test.ts.
 const texts = (sent: Sent[]) =>
-  sent.filter((s) => s.method === "sendMessage" || s.method === "editMessageText").map((s) => s.payload.text);
+  sent
+    .filter((s) => (s.method === "sendMessage" && String(s.payload.chat_id) !== "2") || s.method === "editMessageText")
+    .map((s) => s.payload.text);
 const nonceStatus = (f: ReturnType<typeof createFakeDb>) => f.tables.login_nonces![0]?.status;
 
 describe("telegram login", () => {
@@ -135,11 +143,12 @@ describe("telegram login", () => {
       await bot.handleUpdate(fixture("contact-own"));
       const created = fake.tables.login_nonces![0]!.created_at as string;
       expect(texts(sent)).toEqual([MSG.share, MSG.received, confirmText(NONCE, created)]);
-      expect(sent[1]!.payload.reply_markup).toEqual({ remove_keyboard: true });
+      const user = sent.filter((s) => String(s.payload.chat_id) !== "2");
+      expect(user[1]!.payload.reply_markup).toEqual({ remove_keyboard: true });
       const text = texts(sent)[2] as string;
       expect(text).toContain(`Tasdiqlash kodi: ${loginMatchCode(NONCE, SECRET)}`);
       expect(text).toContain("bosmang");
-      const kb = sent[2]!.payload.reply_markup as { inline_keyboard: { callback_data: string }[][] };
+      const kb = user[2]!.payload.reply_markup as { inline_keyboard: { callback_data: string }[][] };
       expect(kb.inline_keyboard.flat().map((b) => b.callback_data)).toEqual([`lg:ok:${NONCE}`, `lg:no:${NONCE}`]);
       expect(nonceStatus(fake)).toBe("created");
       expect(fake.authUsers.map((u) => u.email)).toEqual(["tg_777@users.internal"]);

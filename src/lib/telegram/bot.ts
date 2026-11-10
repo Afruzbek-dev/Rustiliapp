@@ -4,6 +4,7 @@ import type { UserFromGetMe } from "grammy/types";
 import { serverEnv } from "@/lib/env";
 import { createServiceClient } from "@/lib/supabase/service";
 import type { Db } from "@/lib/telegram/api";
+import { registerEnrollment } from "@/lib/telegram/handlers/enrollment";
 import { MSG, registerLogin } from "@/lib/telegram/handlers/login";
 import { logBotError } from "@/lib/telegram/log";
 
@@ -25,6 +26,7 @@ export function createBot(token: string, getDb: () => Db = createServiceClient, 
     }
   });
   registerLogin(bot, getDb);
+  registerEnrollment(bot, getDb);
   return bot;
 }
 

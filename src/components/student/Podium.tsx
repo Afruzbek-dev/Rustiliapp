@@ -3,9 +3,9 @@ import type { LeaderboardRow, RatingKind } from "@/server/rating";
 import { formatScore, initialsOf } from "./RankRow";
 
 const PLACE = [
-  { name: "1-o'rin", color: "#FFD60A", stand: "h-24", avatar: "size-20 text-2xl" },
-  { name: "2-o'rin", color: "#D9D6CC", stand: "h-16", avatar: "size-16 text-xl" },
-  { name: "3-o'rin", color: "#E39B6B", stand: "h-12", avatar: "size-16 text-xl" },
+  { name: "1-o'rin", color: "var(--podium-gold)", stand: "h-24", avatar: "size-20 text-2xl" },
+  { name: "2-o'rin", color: "var(--podium-silver)", stand: "h-16", avatar: "size-16 text-xl" },
+  { name: "3-o'rin", color: "var(--podium-bronze)", stand: "h-12", avatar: "size-16 text-xl" },
 ] as const;
 
 // Visual order: 2nd, 1st, 3rd (indexes into the best-first podium array).
@@ -77,8 +77,17 @@ export function Podium({ entries, kind, ownId = null }: PodiumProps) {
               )}
             >
               <span className="text-2xl font-extrabold text-ink">
-                <span className="sr-only">{place.name}: </span>
-                {entry ? entry.rank : slot + 1}
+                {entry ? (
+                  <>
+                    <span className="sr-only">{entry.rank}-o&apos;rin: </span>
+                    {entry.rank}
+                  </>
+                ) : (
+                  <>
+                    <span className="sr-only">{place.name}: </span>
+                    {slot + 1}
+                  </>
+                )}
               </span>
             </div>
           </li>

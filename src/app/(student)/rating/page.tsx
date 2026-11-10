@@ -5,7 +5,6 @@ import { Podium } from "@/components/student/Podium";
 import { RankRow } from "@/components/student/RankRow";
 import { RatingTabs } from "@/components/student/RatingTabs";
 import { StreakCelebration } from "@/components/student/StreakCelebration";
-import { tashkentDay } from "@/lib/gamification/day";
 import { createClient } from "@/lib/supabase/server";
 import { requireStudent } from "@/server/guards";
 import { getRating, parseKind, parsePeriod } from "@/server/rating";
@@ -24,9 +23,10 @@ export default async function RatingPage({
   const { user } = await requireStudent();
 
   // Visiting the rating triggers the streak-bonus check. It must never break the page.
-  let milestone: number | null = null;
+  let celebrate: { streak: number; day: string } | null = null;
   try {
-    milestone = (await ensureStreakBonus(await createClient(), user.id)).milestone;
+    const b = await ensureStreakBonus(await createClient(), user.id);
+    if (b.milestone !== null && b.awarded) celebrate = { streak: b.milestone, day: b.today };
   } catch (err) {
     console.error("streak bonus failed", err instanceof Error ? err.message : "unknown error");
   }
@@ -63,7 +63,7 @@ export default async function RatingPage({
         </>
       )}
 
-      {milestone !== null && <StreakCelebration streak={milestone} day={tashkentDay(new Date())} />}
+      {celebrate && <StreakCelebration streak={celebrate.streak} day={celebrate.day} />}
     </main>
   );
 }

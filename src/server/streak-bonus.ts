@@ -12,6 +12,8 @@ export interface StreakBonusResult {
   /** True only when this call actually granted the XP (false on repeat visits). */
   awarded: boolean;
   streak: number;
+  /** Tashkent day (YYYY-MM-DD) the check ran for; reuse it for the once-only celebration key. */
+  today: string;
 }
 
 export interface StreakBonusDeps {
@@ -31,21 +33,20 @@ export const isMilestone = (n: number): n is StreakMilestone => n in STREAK_BONU
  * counts when today is itself an active day: the bonus XP lands on today's daily_activity
  * row, so granting it for a streak that ended yesterday would manufacture activity.
  *
- * Call it from any server component after requireStudent(). The rating page does; the
- * dashboard (src/server/dashboard.ts, owned by another task) can adopt it later with:
- *   `await ensureStreakBonus(await createClient(), studentId)` inside getDashboard.
+ * Called from the home page (before getDashboard, so XP and streak shown include the bonus)
+ * and from the rating page. Show the celebration only when `awarded` is true.
  */
 export async function ensureStreakBonus(
   client: SupabaseClient,
   studentId: string,
   deps: StreakBonusDeps = {},
 ): Promise<StreakBonusResult> {
-  const none: StreakBonusResult = { milestone: null, awarded: false, streak: 0 };
+  const today = tashkentDay(deps.now ?? new Date());
+  const none: StreakBonusResult = { milestone: null, awarded: false, streak: 0, today };
 
   const { data: auth } = await client.auth.getUser();
   if (!auth?.user || auth.user.id !== studentId) return none;
 
-  const today = tashkentDay(deps.now ?? new Date());
   const { data, error } = await client
     .from("daily_activity")
     .select("day")
@@ -68,5 +69,5 @@ export async function ensureStreakBonus(
     p_ref: `streak:${streak}:${today}`,
   });
   if (res.error) throw new Error(`streak bonus: award_xp: ${res.error.message}`);
-  return { milestone: streak, awarded: res.data === true, streak };
+  return { milestone: streak, awarded: res.data === true, streak, today };
 }

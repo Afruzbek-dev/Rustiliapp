@@ -208,6 +208,19 @@ describe("ensureStreakBonus", () => {
     expect(y.rpc).not.toHaveBeenCalled();
   });
 
+  it("a gap resets the streak: no bonus", async () => {
+    const s = setup(days(7).filter((_, i) => i !== 3));
+    expect((await ensureStreakBonus(s.client, "s1", s.deps)).milestone).toBeNull();
+    expect(s.rpc).not.toHaveBeenCalled();
+  });
+
+  it("6 days of activity pays nothing, and reports today", async () => {
+    const s = setup(days(6));
+    const r = await ensureStreakBonus(s.client, "s1", s.deps);
+    expect(r).toMatchObject({ milestone: null, awarded: false, streak: 6, today: "2026-11-10" });
+    expect(s.rpc).not.toHaveBeenCalled();
+  });
+
   it("never acts for a student other than the session user", async () => {
     const s = setup(days(7), "someone-else");
     expect((await ensureStreakBonus(s.client, "s1", s.deps)).milestone).toBeNull();

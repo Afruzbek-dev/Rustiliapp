@@ -17,7 +17,21 @@ export interface TgMediaDeps {
   fetchFile(filePath: string, range: string | null): Promise<Response>;
 }
 
-const baseHeaders = { "X-Content-Type-Options": "nosniff" } as const;
+/** Streams `body` through, erroring (aborting the response) once more than `max` bytes passed. */
+export function capStream(body: ReadableStream<Uint8Array>, max: number): ReadableStream<Uint8Array> {
+  let seen = 0;
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        seen += chunk.byteLength;
+        if (seen > max) controller.error(new Error("too_large"));
+        else controller.enqueue(chunk);
+      },
+    }),
+  );
+}
+
+const baseHeaders ={ "X-Content-Type-Options": "nosniff" } as const;
 
 function plain(status: number, body: string, extra: Record<string, string> = {}): Response {
   return new Response(body, {
@@ -49,7 +63,9 @@ export async function proxyTelegramVideo(
   try {
     const file = await deps.getFile(sub.tgFileId);
     if (file.fileSize !== undefined && file.fileSize > MAX_VIDEO_BYTES) return plain(413, "too_large");
-    const range = req.range && RANGE_RE.test(req.range.trim()) ? req.range.trim() : null;
+    // an invalid Range is refused outright (never silently turned into a full download)
+    if (req.range !== null && !RANGE_RE.test(req.range.trim())) return plain(416, "range_not_satisfiable");
+    const range = req.range ? req.range.trim() : null;
     const upstream = await deps.fetchFile(file.filePath, range);
     if (upstream.status !== 200 && upstream.status !== 206) {
       await upstream.body?.cancel().catch(() => undefined);
@@ -66,14 +82,15 @@ export async function proxyTelegramVideo(
     const headers = new Headers({
       ...baseHeaders,
       "Content-Type": contentType,
-      "Cache-Control": "private, max-age=300",
+      "Cache-Control": "private, no-cache",
+      Vary: "Cookie",
       "Accept-Ranges": "bytes",
     });
     for (const h of ["content-length", "content-range"]) {
       const v = upstream.headers.get(h);
       if (v) headers.set(h, v);
     }
-    return new Response(upstream.body, { status: upstream.status, headers });
+    return new Response(upstream.body ? capStream(upstream.body, MAX_VIDEO_BYTES) : null, { status: upstream.status, headers });
   } catch (e) {
     // Only the error class: messages and URLs can carry the token.
     console.error("tg-media: upstream failed", e instanceof Error ? e.name : "unknown");

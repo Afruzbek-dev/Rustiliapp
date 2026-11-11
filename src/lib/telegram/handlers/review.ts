@@ -7,7 +7,8 @@ export const RV_MSG = {
   denied: "Ruxsat yo'q",
   incomplete: "Barcha mezonlarni belgilang",
   alreadyByOther: "Boshqa kurator allaqachon baholagan",
-  alreadyReviewed: "Allaqachon baholangan",
+  alreadySaved: "Allaqachon saqlangan",
+  notUploaded: "Topshiriq hali to'liq yuklanmagan",
   notFound: "Topshiriq topilmadi",
   error: "Xatolik, qayta urinib ko'ring",
 } as const;
@@ -19,8 +20,9 @@ export interface ReviewBotStore {
   /** SQL review_authority: 'curator' | 'staff' | null. */
   authority(submissionId: string, profileId: string): Promise<"curator" | "staff" | null>;
   /** SQL set_draft_score (atomic jsonb_set); the new draft, or null when the submission is not pending. */
-  setDraft(submissionId: string, criterion: Criterion, value: number): Promise<Partial<Scores> | null>;
-  getDraftState(submissionId: string): Promise<{ status: "pending" | "reviewed"; draft: Partial<Scores> } | null>;
+  setDraft(submissionId: string, actorId: string, criterion: Criterion, value: number): Promise<Partial<Scores> | null>;
+  /** firstReviewerId: who wrote the first (winning) review, if any. */
+  getDraftState(submissionId: string): Promise<{ status: "pending" | "reviewed"; draft: Partial<Scores>; firstReviewerId: string | null } | null>;
 }
 
 export interface ReviewWiring {
@@ -49,6 +51,16 @@ export function registerReview(bot: Bot, getWiring: () => ReviewWiring) {
   });
 }
 
+/** The same curator tapping twice is told "already saved", not that ANOTHER curator reviewed. */
+function alreadyTextFor(firstReviewerId: string | null, actorId: string): string {
+  return firstReviewerId === actorId ? RV_MSG.alreadySaved : RV_MSG.alreadyByOther;
+}
+
+async function alreadyText(w: ReviewWiring, submissionId: string, actorId: string): Promise<string> {
+  const state = await w.store.getDraftState(submissionId);
+  return alreadyTextFor(state?.firstReviewerId ?? null, actorId);
+}
+
 async function handle(ctx: Context, w: ReviewWiring) {
   const data = ctx.callbackQuery!.data!;
   const deny = () => ctx.answerCallbackQuery({ text: RV_MSG.denied, show_alert: true });
@@ -63,9 +75,9 @@ async function handle(ctx: Context, w: ReviewWiring) {
   if (!(await w.store.authority(submissionId, actor.id))) return void (await deny());
 
   if (score) {
-    const draft = await w.store.setDraft(submissionId, CODE_TO_KEY[score[2]!]!, Number(score[3]));
+    const draft = await w.store.setDraft(submissionId, actor.id, CODE_TO_KEY[score[2]!]!, Number(score[3]));
     if (!draft) {
-      await ctx.answerCallbackQuery({ text: RV_MSG.alreadyReviewed, show_alert: true });
+      await ctx.answerCallbackQuery({ text: await alreadyText(w, submissionId, actor.id), show_alert: true });
       return;
     }
     await ctx.answerCallbackQuery();
@@ -80,7 +92,7 @@ async function handle(ctx: Context, w: ReviewWiring) {
     return;
   }
   if (state.status === "reviewed") {
-    await ctx.answerCallbackQuery({ text: RV_MSG.alreadyReviewed, show_alert: true });
+    await ctx.answerCallbackQuery({ text: alreadyTextFor(state.firstReviewerId, actor.id), show_alert: true });
     return;
   }
   if (!CRITERIA.every((c) => Number.isInteger(state.draft[c]))) {
@@ -103,10 +115,12 @@ async function handle(ctx: Context, w: ReviewWiring) {
         e.code === "forbidden"
           ? RV_MSG.denied
           : e.code === "already_reviewed"
-            ? RV_MSG.alreadyByOther
+            ? await alreadyText(w, submissionId, actor.id)
             : e.code === "not_found"
               ? RV_MSG.notFound
-              : RV_MSG.error;
+              : e.code === "incomplete"
+                ? RV_MSG.notUploaded
+                : RV_MSG.error;
       await ctx.answerCallbackQuery({ text, show_alert: true });
       return;
     }

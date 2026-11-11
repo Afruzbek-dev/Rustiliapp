@@ -14,8 +14,10 @@
  *      closes except for a crash between the Telegram send and storing its message id.
  */
 export interface CompletionSteps {
-  claim(): Promise<boolean>;
-  release(): Promise<void>;
+  /** The lease token (claim timestamp) for the single winner, else null. */
+  claim(): Promise<string | null>;
+  /** Releases only THIS holder's lease (token-scoped). */
+  release(token: string): Promise<void>;
   work(): Promise<void>;
   notify(): Promise<void>;
   markNotified(): Promise<void>;
@@ -28,18 +30,19 @@ export async function runSubmissionCompletion(
   log: (op: string, e: unknown) => void = (op, e) =>
     console.error(`submission-completion: ${op}`, e instanceof Error ? e.name : "unknown"),
 ): Promise<CompletionResult> {
-  if (!(await steps.claim())) return "skipped";
+  const token = await steps.claim();
+  if (token === null) return "skipped";
   try {
     await steps.work();
   } catch (e) {
-    await steps.release().catch(() => undefined);
+    await steps.release(token).catch(() => undefined);
     throw e;
   }
   try {
     await steps.notify();
   } catch (e) {
     log("notify failed", e);
-    await steps.release().catch(() => undefined);
+    await steps.release(token).catch(() => undefined);
     return "notify_failed";
   }
   try {

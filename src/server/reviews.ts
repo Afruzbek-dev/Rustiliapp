@@ -1,6 +1,5 @@
 import "server-only";
 import { z } from "zod";
-import { speakingXp } from "@/lib/gamification/xp";
 
 export const CRITERIA = ["completeness", "pronunciation", "grammar", "fluency"] as const;
 export type Criterion = (typeof CRITERIA)[number];
@@ -25,15 +24,23 @@ export const reviewInputSchema = z.object({
   scores: scoresSchema,
   comment,
   channel: z.enum(["web", "telegram"]),
+  /** explicit staff override of an already reviewed submission (web only) */
+  override: z.boolean().optional(),
 });
 export type ReviewInput = z.input<typeof reviewInputSchema>;
 
 /** Body of POST /api/reviews: the reviewer is never part of it. */
 export const reviewBodySchema = z
-  .object({ submissionId: z.string().uuid(), scores: scoresSchema, comment })
+  .object({ submissionId: z.string().uuid(), scores: scoresSchema, comment, override: z.boolean().optional() })
   .strict();
 
-export type ReviewErrorCode = "invalid_input" | "forbidden" | "not_found" | "incomplete" | "already_reviewed";
+export type ReviewErrorCode =
+  | "invalid_input"
+  | "forbidden"
+  | "not_found"
+  | "incomplete"
+  | "unsupported_kind"
+  | "already_reviewed";
 
 /** Typed failure; `message` is just the code, never row data. */
 export class ReviewError extends Error {
@@ -44,8 +51,9 @@ export class ReviewError extends Error {
 }
 
 export type SubmitOutcome =
-  | { outcome: "ok"; reviewId: string; total: number; isOverride: boolean; studentId: string }
-  | { outcome: "forbidden" | "not_found" | "incomplete" | "already_reviewed" };
+  | { outcome: "ok"; reviewId: string; total: number; isOverride: boolean; studentId: string; xpAwarded: boolean }
+  | { outcome: "duplicate"; reviewId: string; total: number }
+  | { outcome: "forbidden" | "not_found" | "incomplete" | "unsupported_kind" | "already_reviewed" };
 
 export interface ReviewNotice {
   kind: string;
@@ -58,9 +66,14 @@ export interface ReviewNotice {
 /** Data access. Production: service client + SQL functions (review-store.ts). */
 export interface ReviewStore {
   /** SQL submit_review: authority check, status flip and review insert in ONE transaction. */
-  submit(a: { submissionId: string; reviewerId: string; channel: "web" | "telegram"; scores: Scores; comment: string | null }): Promise<SubmitOutcome>;
-  /** award_xp(): true when XP was actually granted (idempotent per student/reason/ref). */
-  awardSpeakingXp(studentId: string, amount: number, submissionId: string): Promise<boolean>;
+  submit(a: {
+    submissionId: string;
+    reviewerId: string;
+    channel: "web" | "telegram";
+    scores: Scores;
+    comment: string | null;
+    allowOverride: boolean;
+  }): Promise<SubmitOutcome>;
   getNotice(submissionId: string, reviewerId: string): Promise<ReviewNotice | null>;
 }
 
@@ -103,13 +116,13 @@ function logStep(step: string, e: unknown): void {
 
 /**
  * Stores a review. The reviewer must be the curator of the submission's group, the course's teacher
- * or an admin (decided in SQL: submit_review). CURATOR: the FIRST review wins, later ones fail with
- * `already_reviewed`. TEACHER/ADMIN: may review any time; a review of an already reviewed submission
- * is stored with is_override = true (history kept). XP is paid only for the first (non-override)
- * review. After the commit: XP, the DM to the student and the curator-message edit run as
- * independent best-effort steps (failures are logged by op/class and never roll the review back).
- * Residual: if the process dies between commit and XP, the XP is not retried automatically
- * (award_xp is idempotent per submission, so a manual re-run is safe).
+ * or an admin, and never the submission's own student (all decided in SQL: submit_review). The FIRST
+ * review wins for everyone: later ones fail with `already_reviewed`, EXCEPT an explicit staff
+ * override (`override: true` from the web by a teacher/admin), which is stored with is_override =
+ * true (history kept). The XP award happens INSIDE the same SQL transaction (first review only,
+ * audio/video only), so it can never be lost after a commit. After the commit the DM to the student
+ * and the curator-message edit run as independent best-effort steps (failures are logged by
+ * op/class and never roll the review back).
  */
 export async function submitReview(input: ReviewInput, injected?: ReviewDeps): Promise<ReviewResult> {
   const parsed = reviewInputSchema.safeParse(input);
@@ -118,21 +131,20 @@ export async function submitReview(input: ReviewInput, injected?: ReviewDeps): P
   const deps = injected ?? (await import("./review-store")).defaultReviewDeps();
   const { submissionId, reviewerProfileId, scores, comment: commentText, channel } = parsed.data;
 
-  const r = await deps.store.submit({ submissionId, reviewerId: reviewerProfileId, channel, scores, comment: commentText });
-  if (r.outcome !== "ok") throw new ReviewError(r.outcome);
-
-  let xpAwarded = false;
-  if (!r.isOverride) {
-    const amount = speakingXp(r.total);
-    for (let attempt = 0; attempt < 2 && !xpAwarded; attempt++) {
-      try {
-        xpAwarded = await deps.store.awardSpeakingXp(r.studentId, amount, submissionId);
-        break;
-      } catch (e) {
-        if (attempt === 1) logStep("award_xp", e);
-      }
-    }
+  const r = await deps.store.submit({
+    submissionId,
+    reviewerId: reviewerProfileId,
+    channel,
+    scores,
+    comment: commentText,
+    allowOverride: channel === "web" && parsed.data.override === true, // Telegram never overrides
+  });
+  if (r.outcome === "duplicate") {
+    // an identical staff override submitted again within seconds (double tap): nothing new, no second DM
+    return { reviewId: r.reviewId, total: r.total, isOverride: true, xpAwarded: false };
   }
+  if (r.outcome !== "ok") throw new ReviewError(r.outcome);
+  const xpAwarded = r.xpAwarded;
 
   let notice: ReviewNotice | null = null;
   try {
@@ -186,6 +198,7 @@ export async function handleReviewRequest(deps: ReviewRouteDeps, req: { userId: 
       scores: body.data.scores,
       comment: body.data.comment,
       channel: "web",
+      override: body.data.override,
     });
     return { status: 200, json: { ok: true, total: r.total, isOverride: r.isOverride } };
   } catch (e) {
@@ -199,6 +212,8 @@ export async function handleReviewRequest(deps: ReviewRouteDeps, req: { userId: 
           return { status: 409, json: { error: "already_reviewed" } };
         case "incomplete":
           return { status: 409, json: { error: "submission_incomplete" } };
+        case "unsupported_kind":
+          return { status: 409, json: { error: "unsupported_kind" } };
         default:
           return { status: 400, json: { error: "invalid_request" } };
       }

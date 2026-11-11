@@ -11,7 +11,7 @@ export const ADMIN = "adadadad-adad-4ada-8ada-adadadadadad";
 type Role = "student" | "curator" | "teacher" | "admin";
 export interface FakeSub {
   id: string;
-  kind: "audio" | "video";
+  kind: "audio" | "video" | "text";
   studentId: string;
   groupCurator: string; // curator of the submission's group
   complete: boolean;
@@ -22,7 +22,7 @@ export interface FakeSub {
 }
 
 /** In-memory model of the SQL functions (submit_review, review_authority, set_draft_score). */
-export function createReviewWorld(opts: { sub?: Partial<FakeSub>; failDm?: boolean; failXp?: boolean; failEdit?: boolean } = {}) {
+export function createReviewWorld(opts: { sub?: Partial<FakeSub>; failDm?: boolean; failEdit?: boolean } = {}) {
   const roles: Record<string, { role: Role; name: string; telegramId: number | null }> = {
     [STUDENT]: { role: "student", name: "Ali Valiyev", telegramId: 777 },
     [CURATOR]: { role: "curator", name: "Kurator Bir", telegramId: 101 },
@@ -34,7 +34,8 @@ export function createReviewWorld(opts: { sub?: Partial<FakeSub>; failDm?: boole
     id: SUB, kind: "video", studentId: STUDENT, groupCurator: CURATOR, complete: true, status: "pending", draft: {},
     curatorChatId: -100500, curatorMessageId: 42, ...opts.sub,
   };
-  const reviews: { reviewerId: string; channel: string; scores: Scores; total: number; comment: string | null; isOverride: boolean }[] = [];
+  const submitCalls: { allowOverride: boolean; channel: string }[] = [];
+  const reviews: { id: string; reviewerId: string; channel: string; scores: Scores; total: number; comment: string | null; isOverride: boolean }[] = [];
   const xp: { studentId: string; amount: number; ref: string }[] = [];
   const dms: { chatId: number; text: string }[] = [];
   const edits: { chatId: number; messageId: number; kind: string; text: string }[] = [];
@@ -42,7 +43,7 @@ export function createReviewWorld(opts: { sub?: Partial<FakeSub>; failDm?: boole
   const authority = (id: string, reviewer: string): "curator" | "staff" | null => {
     if (id !== sub.id) return null;
     const r = roles[reviewer];
-    if (!r) return null;
+    if (!r || reviewer === sub.studentId) return null; // nobody reviews their own submission
     if (r.role === "admin" || r.role === "teacher") return "staff";
     if (r.role === "curator" && reviewer === sub.groupCurator) return "curator";
     return null;
@@ -50,26 +51,35 @@ export function createReviewWorld(opts: { sub?: Partial<FakeSub>; failDm?: boole
 
   const store: ReviewStore & ReviewBotStore = {
     async submit(a): Promise<SubmitOutcome> {
+      submitCalls.push({ allowOverride: a.allowOverride, channel: a.channel });
       if (a.submissionId !== sub.id) return { outcome: "not_found" };
       const auth = authority(a.submissionId, a.reviewerId);
       if (!auth) return { outcome: "forbidden" };
+      if (sub.kind !== "audio" && sub.kind !== "video") return { outcome: "unsupported_kind" };
       if (!sub.complete) return { outcome: "incomplete" };
       let isOverride = false;
+      const s = a.scores;
+      const total = Math.round(((s.completeness + s.pronunciation + s.grammar + s.fluency) / 4) * 100) / 100;
       if (sub.status === "pending") {
         sub.status = "reviewed";
         sub.draft = {};
-      } else if (auth === "curator") return { outcome: "already_reviewed" };
-      else isOverride = true;
-      const s = a.scores;
-      const total = Math.round(((s.completeness + s.pronunciation + s.grammar + s.fluency) / 4) * 100) / 100;
-      reviews.push({ reviewerId: a.reviewerId, channel: a.channel, scores: s, total, comment: a.comment, isOverride });
-      return { outcome: "ok", reviewId: `r${reviews.length}`, total, isOverride, studentId: sub.studentId };
-    },
-    async awardSpeakingXp(studentId, amount, ref) {
-      if (opts.failXp) throw new Error("xp down");
-      if (xp.some((x) => x.studentId === studentId && x.ref === ref)) return false;
-      xp.push({ studentId, amount, ref });
-      return true;
+      } else if (!(a.allowOverride && auth === "staff")) return { outcome: "already_reviewed" };
+      else {
+        isOverride = true;
+        const dup = reviews.find((r) => r.isOverride && r.reviewerId === a.reviewerId && JSON.stringify(r.scores) === JSON.stringify(s) && r.comment === a.comment);
+        if (dup) return { outcome: "duplicate", reviewId: dup.id, total: dup.total };
+      }
+      const id = `r${reviews.length + 1}`;
+      reviews.push({ id, reviewerId: a.reviewerId, channel: a.channel, scores: s, total, comment: a.comment, isOverride });
+      let xpAwarded = false;
+      if (!isOverride) {
+        // XP inside the same "transaction": idempotent per (student, ref)
+        if (!xp.some((x) => x.studentId === sub.studentId && x.ref === sub.id)) {
+          xp.push({ studentId: sub.studentId, amount: Math.round((40 * total) / 5), ref: sub.id });
+          xpAwarded = true;
+        }
+      }
+      return { outcome: "ok", reviewId: id, total, isOverride, studentId: sub.studentId, xpAwarded };
     },
     async getNotice(id, reviewerId): Promise<ReviewNotice | null> {
       if (id !== sub.id) return null;
@@ -89,13 +99,15 @@ export function createReviewWorld(opts: { sub?: Partial<FakeSub>; failDm?: boole
     async authority(id, profileId) {
       return authority(id, profileId);
     },
-    async setDraft(id, criterion, value) {
+    async setDraft(id, actorId, criterion, value) {
+      if (!authority(id, actorId)) throw new Error("forbidden"); // SQL: review_authority inside set_draft_score
       if (id !== sub.id || sub.status !== "pending") return null;
       sub.draft = { ...sub.draft, [criterion]: value };
       return { ...sub.draft };
     },
     async getDraftState(id) {
-      return id === sub.id ? { status: sub.status, draft: { ...sub.draft } } : null;
+      const first = reviews[0];
+      return id === sub.id ? { status: sub.status, draft: { ...sub.draft }, firstReviewerId: first ? first.reviewerId : null } : null;
     },
   };
 
@@ -112,5 +124,5 @@ export function createReviewWorld(opts: { sub?: Partial<FakeSub>; failDm?: boole
       },
     },
   };
-  return { sub, roles, reviews, xp, dms, edits, store, deps };
+  return { sub, roles, reviews, xp, dms, edits, store, deps, submitCalls };
 }

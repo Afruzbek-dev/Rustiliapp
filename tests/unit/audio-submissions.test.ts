@@ -63,9 +63,9 @@ function setup(over: { failMarkNotified?: boolean; limited?: boolean; failPartOn
     },
     claimNotification: async (id, sid) => {
       const s = subs.get(id);
-      if (!s || s.studentId !== sid || s.notifiedAt || claimed.has(id) || !s.storagePath) return false;
+      if (!s || s.studentId !== sid || s.notifiedAt || claimed.has(id) || !s.storagePath) return null;
       claimed.add(id);
-      return true;
+      return "tok";
     },
     releaseNotification: async (id) => {
       claimed.delete(id);

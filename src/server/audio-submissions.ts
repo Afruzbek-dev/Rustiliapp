@@ -65,9 +65,9 @@ export interface AudioStore extends ProgressStore {
   /** Marks the submission as fully processed (part, daily task and curator notice done). */
   markNotified(submissionId: string): Promise<void>;
   /** Atomic lease (SQL claim_submission_notification): true for exactly one concurrent caller. */
-  claimNotification(submissionId: string, studentId: string): Promise<boolean>;
+  claimNotification(submissionId: string, studentId: string): Promise<string | null>;
   /** Gives the lease back after a failure. */
-  releaseNotification(submissionId: string): Promise<void>;
+  releaseNotification(submissionId: string, token: string): Promise<void>;
 }
 
 export interface AudioDeps {
@@ -179,7 +179,7 @@ export async function handleAudioComplete(deps: AudioDeps, req: { userId: string
       const dayStart = new Date(`${tashkentDay(now)}T00:00:00+05:00`).toISOString();
       await runSubmissionCompletion({
         claim: () => store.claimNotification(sub.id, studentId),
-        release: () => store.releaseNotification(sub.id),
+        release: (token) => store.releaseNotification(sub.id, token),
         work: async () => {
           if (info.partId) await completePart(store, studentId, info.partId);
           if (!(await store.hasOtherCompletedSince(studentId, sub.id, dayStart))) await deps.bumpSpeaking(studentId);

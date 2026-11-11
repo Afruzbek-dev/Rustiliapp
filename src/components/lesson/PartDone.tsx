@@ -17,7 +17,7 @@ export function PartDone({ xp, nextPartId }: PartDoneProps) {
       {xp > 0 ? (
         <p className="text-xl font-extrabold text-ok-text">+{xp} XP</p>
       ) : (
-        <p className="text-ink-2">Bu darsni avval ham tugatgansiz.</p>
+        <p className="text-ink-2">Dars tugallangan.</p>
       )}
       <div className="mt-4 flex w-full max-w-sm flex-col gap-3">
         {nextPartId && (

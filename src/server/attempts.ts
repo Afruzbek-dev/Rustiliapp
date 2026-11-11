@@ -107,6 +107,8 @@ export interface AttemptDeps {
   onCorrect?: (info: { studentId: string; partId: string; exerciseId: string }) => Promise<void>;
 }
 
+const HOOK_WAIT_MS = 1500;
+
 export async function submitAttempt(
   deps: AttemptDeps,
   input: { studentId: string; exerciseId: string; answer: unknown },
@@ -155,12 +157,14 @@ export async function submitAttempt(
     const amount = xpForCorrect(prior);
     if (await store.awardXp(studentId, amount, "exercise_correct", ref)) xpAwarded += amount;
     if (exercise.partId && deps.onCorrect) {
-      try {
-        // Daily-task glue (grammar task). Best effort: never fails the attempt, logs no PII.
-        await deps.onCorrect({ studentId, partId: exercise.partId, exerciseId });
-      } catch (e) {
-        console.error("attempts: onCorrect hook failed", e instanceof Error ? e.name : "unknown");
-      }
+      // Daily-task glue (grammar task). Best effort and non-blocking: errors are logged by class only,
+      // and the response waits for the hook at most HOOK_WAIT_MS.
+      const hook = deps
+        .onCorrect({ studentId, partId: exercise.partId, exerciseId })
+        .catch((e: unknown) => console.error("attempts: onCorrect hook failed", e instanceof Error ? e.name : "unknown"));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([hook, new Promise<void>((r) => (timer = setTimeout(r, HOOK_WAIT_MS)))]);
+      clearTimeout(timer);
     }
     if (exercise.partId) {
       const part = await completePart(store, studentId, exercise.partId);

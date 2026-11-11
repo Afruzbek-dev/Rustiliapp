@@ -2,10 +2,9 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { Button, ErrorState } from "@/components/ui";
-import { PART_COMPLETED } from "@/lib/gamification/xp";
 import { UNSUPPORTED_BLOCK_TEXT } from "@/lib/blocks/types";
 import type { LessonPartData } from "@/server/lesson";
 import { AudioBlock } from "./blocks/AudioBlock";
@@ -43,6 +42,23 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
   const [index, setIndex] = useState(() => Math.min(Math.max(0, Math.floor(initialIndex)), Math.max(0, total - 1)));
   const [done, setDone] = useState<ReadonlySet<string>>(() => new Set());
   const [phase, setPhase] = useState<Phase>({ kind: "blocks" });
+  // Set when the student came back from the "missing" screen: after that block, go straight to finishing.
+  const [returning, setReturning] = useState(false);
+  const mainRef = useRef<HTMLElement>(null);
+  const firstRender = useRef(true);
+
+  // Move focus to the new block's heading (or the container) so keyboard / screen reader users land on it.
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      return;
+    }
+    const main = mainRef.current;
+    if (!main) return;
+    const target = (main.querySelector("h1, h2") as HTMLElement | null) ?? main;
+    target.tabIndex = -1;
+    target.focus();
+  }, [index, phase.kind]);
 
   const block = data.blocks[index];
   const blockId = block?.id ?? "";
@@ -69,13 +85,13 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
       }
       const body = (await res.json()) as {
         completed?: boolean;
+        newlyCompleted?: boolean;
         xpAwarded?: number;
         missing?: MissingItem[];
       };
       if (body.completed === true) {
-        // Part XP is paid once. If this request did not pay it, the correct attempt that completed the
-        // part already did (the attempts route completes parts too), unless it was completed before.
-        const earned = data.progress === "completed" ? 0 : body.xpAwarded && body.xpAwarded > 0 ? body.xpAwarded : PART_COMPLETED;
+        // Only claim XP this request actually granted.
+        const earned = body.newlyCompleted === true || (body.xpAwarded ?? 0) > 0 ? body.xpAwarded || 0 : 0;
         setPhase({ kind: "done", xp: earned });
       } else {
         setPhase({ kind: "missing", items: Array.isArray(body.missing) ? body.missing : [] });
@@ -83,7 +99,7 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
     } catch {
       setPhase({ kind: "error", auth: false });
     }
-  }, [data.part.id, data.progress]);
+  }, [data.part.id]);
 
   if (!block) {
     return <ErrorState title="Dars bo'sh" text="Bu darsda hali bloklar yo'q." action={<Button href="/path">Yo&apos;lga qaytish</Button>} />;
@@ -145,6 +161,7 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
                         fullWidth
                         onClick={() => {
                           setIndex(at);
+                          setReturning(true);
                           setPhase({ kind: "blocks" });
                         }}
                       >
@@ -221,12 +238,12 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
           aria-label="Dars jarayoni"
           aria-valuemin={0}
           aria-valuemax={total}
-          aria-valuenow={index}
+          aria-valuenow={index + 1}
           className="h-3 flex-1 overflow-hidden rounded-full bg-surface-2"
         >
           <div
             className="h-full rounded-full bg-brand transition-[width] duration-150 motion-reduce:transition-none"
-            style={{ width: `${(index / total) * 100}%` }}
+            style={{ width: `${((index + 1) / total) * 100}%` }}
           />
         </div>
         <span className="shrink-0 text-sm font-bold text-ink-2" aria-label={`${index + 1}-blok, jami ${total}`}>
@@ -234,7 +251,7 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
         </span>
       </header>
 
-      <main className="flex-1 px-4 pt-2 pb-28">{body}</main>
+      <main ref={mainRef} className="flex-1 px-4 pt-2 pb-28">{body}</main>
 
       <footer className="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-md border-t-2 border-border bg-bg px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <Button
@@ -242,11 +259,11 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
           size="lg"
           disabled={!canNext}
           onClick={() => {
-            if (isLast) void finish();
+            if (isLast || returning) void finish();
             else setIndex(index + 1);
           }}
         >
-          {isLast ? "Tugatish" : "Keyingisi"}
+          {isLast || returning ? "Tugatish" : "Keyingisi"}
         </Button>
       </footer>
     </div>

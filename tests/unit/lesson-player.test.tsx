@@ -69,7 +69,7 @@ describe("LessonPlayer", () => {
     render(<LessonPlayer data={data([text("a", "Birinchi"), text("b", "Ikkinchi")])} media={{}} />);
     expect(screen.getByRole("link", { name: "Darsni yopish" })).toHaveAttribute("href", "/path");
     expect(screen.getByText("1/2")).toBeInTheDocument();
-    expect(screen.getByRole("progressbar", { name: "Dars jarayoni" })).toHaveAttribute("aria-valuenow", "0");
+    expect(screen.getByRole("progressbar", { name: "Dars jarayoni" })).toHaveAttribute("aria-valuenow", "1");
     expect(screen.getByText("Birinchi")).toBeInTheDocument();
     expect(next()).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "O'qidim" }));
@@ -77,7 +77,7 @@ describe("LessonPlayer", () => {
     await userEvent.click(next());
     expect(screen.getByText("Ikkinchi")).toBeInTheDocument();
     expect(screen.getByText("2/2")).toBeInTheDocument();
-    expect(screen.getByRole("progressbar", { name: "Dars jarayoni" })).toHaveAttribute("aria-valuenow", "1");
+    expect(screen.getByRole("progressbar", { name: "Dars jarayoni" })).toHaveAttribute("aria-valuenow", "2");
     expect(screen.getByRole("button", { name: "Tugatish" })).toBeDisabled();
   });
 
@@ -97,6 +97,31 @@ describe("LessonPlayer", () => {
     fireEvent.load(frame);
     await userEvent.click(screen.getByRole("button", { name: "Ko'rdim" }));
     expect(next()).toBeEnabled();
+  });
+
+  it("video: after a timeout without load the student can continue", async () => {
+    vi.useFakeTimers();
+    const block: BlockResult = {
+      id: "v",
+      type: "video",
+      payload: { provider: "youtube", videoId: "dQw4w9WgXcQ", title: "Salom video" },
+    };
+    render(<LessonPlayer data={data([block, text("t")])} media={{}} />);
+    expect(screen.queryByRole("button", { name: /davom etish/ })).not.toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(8100);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Videoni ochib bo'lmadi, davom etish" }));
+    expect(next()).toBeEnabled();
+    vi.useRealTimers();
+  });
+
+  it("focus moves to the new block's heading after Next", async () => {
+    const b: BlockResult = { id: "t2", type: "text", payload: { title: "Ikkinchi sarlavha", body: "Matn" } };
+    render(<LessonPlayer data={data([text("a", "Birinchi"), b])} media={{}} />);
+    await userEvent.click(screen.getByRole("button", { name: "O'qidim" }));
+    await userEvent.click(next());
+    expect(screen.getByRole("heading", { name: "Ikkinchi sarlavha" })).toHaveFocus();
   });
 
   it("audio: manual 'Eshitdim' or ended unlocks Next and reports the listen once", async () => {
@@ -212,16 +237,17 @@ describe("LessonPlayer", () => {
       expect(screen.getByRole("link", { name: "Yo'lga qaytish" })).toHaveAttribute("href", "/path");
     });
 
-    it("shows the part XP even when an attempt already completed the part, but none on a replay", async () => {
+    it("claims no XP the request did not grant", async () => {
       reply({ completed: true, newlyCompleted: false, xpAwarded: 0 });
       await toLast(data([text("a")]));
-      expect(await screen.findByText("+20 XP")).toBeInTheDocument();
+      expect(await screen.findByText("Dars tugallandi!")).toBeInTheDocument();
+      expect(screen.queryByText(/XP/)).not.toBeInTheDocument();
     });
 
     it("no XP and no 'Keyingi dars' for an already completed part without a next part", async () => {
       reply({ completed: true, newlyCompleted: false, xpAwarded: 0 });
       await toLast(data([text("a")], { progress: "completed", nextPartId: null }));
-      expect(await screen.findByText("Bu darsni avval ham tugatgansiz.")).toBeInTheDocument();
+      expect(await screen.findByText("Dars tugallangan.")).toBeInTheDocument();
       expect(screen.queryByText(/XP/)).not.toBeInTheDocument();
       expect(screen.queryByRole("link", { name: "Keyingi dars" })).not.toBeInTheDocument();
     });
@@ -247,6 +273,13 @@ describe("LessonPlayer", () => {
       await userEvent.click(screen.getByRole("button", { name: /1-blok/ }));
       expect(screen.getByText("Rodni toping")).toBeInTheDocument();
       expect(screen.getByText("1/3")).toBeInTheDocument();
+      // once that exercise is done the student goes straight to finishing, not through blocks 2 and 3
+      reply({ correct: true, xpAwarded: 10 });
+      reply({ completed: true, newlyCompleted: true, xpAwarded: 20 });
+      await userEvent.click(screen.getByRole("button", { name: /Ayol/ }));
+      await userEvent.click(await screen.findByRole("button", { name: "Davom etish" }));
+      await userEvent.click(await screen.findByRole("button", { name: "Tugatish" }));
+      expect(await screen.findByText("Dars tugallandi!")).toBeInTheDocument();
     });
 
     it("an empty missing list and a server error are handled", async () => {

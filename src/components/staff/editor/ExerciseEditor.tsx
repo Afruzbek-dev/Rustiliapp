@@ -28,9 +28,11 @@ export interface ExerciseEditorProps {
   isTestItem: boolean;
   /** Students already answered it: the type cannot change. */
   typeLocked?: boolean;
+  /** Test items carry no per-exercise XP (the test pays by score): hide the field. */
+  hideXp?: boolean;
 }
 
-export function ExerciseEditor({ draft, onChange, isTestItem, typeLocked = false }: ExerciseEditorProps) {
+export function ExerciseEditor({ draft, onChange, isTestItem, typeLocked = false, hideXp = false }: ExerciseEditorProps) {
   const type = (isAuthorableType(draft.type) ? draft.type : "classify") as AuthorableType;
   const [model, setModel] = useState<unknown>(() =>
     draft.payload && Object.keys(draft.payload as object).length > 0 ? modelFromDraft(type, draft.payload, draft.key) : emptyModel(type),
@@ -95,7 +97,7 @@ export function ExerciseEditor({ draft, onChange, isTestItem, typeLocked = false
       {type === "choose" && <ChooseForm m={model as ChooseModel} set={update} />}
       {type === "match" && <MatchForm m={model as MatchModel} set={update} />}
 
-      <div className="max-w-40">
+      {!hideXp && <div className="max-w-40">
         <TextField
           label="XP (butun mashq uchun)"
           type="number"
@@ -105,7 +107,7 @@ export function ExerciseEditor({ draft, onChange, isTestItem, typeLocked = false
           value={String(draft.xp)}
           onChange={(e) => onChange({ ...draft, xp: Math.max(0, Math.min(200, Math.floor(Number(e.target.value) || 0))) })}
         />
-      </div>
+      </div>}
 
       {!check.ok && <IssueList title="Nashrdan oldin tuzating" issues={check.errors} />}
     </div>

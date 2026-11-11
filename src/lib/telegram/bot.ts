@@ -6,7 +6,10 @@ import { createServiceClient } from "@/lib/supabase/service";
 import type { Db } from "@/lib/telegram/api";
 import { registerEnrollment } from "@/lib/telegram/handlers/enrollment";
 import { MSG, registerLogin } from "@/lib/telegram/handlers/login";
+import { registerReview, type ReviewWiring } from "@/lib/telegram/handlers/review";
 import { registerVideo, type VideoWiring } from "@/lib/telegram/handlers/video";
+import { createSupabaseReviewBotStore } from "@/server/review-store";
+import { submitReview } from "@/server/reviews";
 import { logBotError } from "@/lib/telegram/log";
 import { bumpDailyTask } from "@/server/daily-tasks";
 import { notifyCuratorsOfSubmission } from "@/server/notify-curators";
@@ -26,12 +29,17 @@ function defaultVideoWiring(getDb: () => Db): VideoWiring {
   };
 }
 
-/** Builds a bot with all handlers; `getDb`, `botInfo` and the video wiring are injectable for tests. */
+function defaultReviewWiring(getDb: () => Db): () => ReviewWiring {
+  return () => ({ store: createSupabaseReviewBotStore(getDb()), submit: (input) => submitReview(input) });
+}
+
+/** Builds a bot with all handlers; `getDb`, `botInfo` and the video/review wiring are injectable for tests. */
 export function createBot(
   token: string,
   getDb: () => Db = createServiceClient,
   botInfo?: UserFromGetMe,
   video: VideoWiring = defaultVideoWiring(getDb),
+  review: () => ReviewWiring = defaultReviewWiring(getDb),
 ) {
   const bot = new Bot(token, botInfo ? { botInfo } : undefined);
   // Errors never escape: a non-2xx would make Telegram retry the same update forever.
@@ -50,6 +58,7 @@ export function createBot(
   });
   registerLogin(bot, getDb);
   registerVideo(bot, video);
+  registerReview(bot, review);
   registerEnrollment(bot, getDb);
   return bot;
 }

@@ -109,8 +109,14 @@ export function BlockEditor(p: BlockEditorProps) {
       {(block.type === "audio" || block.type === "rule_image") && (
         <MediaForm kind={block.type === "audio" ? "audio" : "image"} lessonId={p.lessonId} value={value as Record<string, unknown>} onChange={change} actions={p.actions} uploader={p.uploader} />
       )}
-      {(block.type === "text" || block.type === "reading") && <TextForm value={value as Record<string, unknown>} onChange={change} words={p.words} />}
-      {block.type === "exercise" && <ExerciseEditor draft={value as ExerciseInput} onChange={change} isTestItem={block.exercise?.isTestItem ?? false} />}
+      {block.type === "reading" && (
+        <div className="flex flex-col gap-2">
+          <p className="text-ink-2">Bu blok turi tahrirlanmaydi (faqat ko&apos;rish).</p>
+          <p lang="ru" className="whitespace-pre-wrap rounded-[var(--radius-md)] bg-surface-2 p-3">{typeof block.payload.body === "string" ? block.payload.body : ""}</p>
+        </div>
+      )}
+      {block.type === "text" && <TextForm value={value as Record<string, unknown>} onChange={change} words={p.words} />}
+      {block.type === "exercise" && <ExerciseEditor draft={value as ExerciseInput} onChange={change} isTestItem={block.exercise?.isTestItem ?? false} typeLocked={block.exercise?.typeLocked ?? false} />}
       {block.type === "speaking" && <SpeakingForm draft={value as ExerciseInput} onChange={change} />}
       {block.type === "words" && <WordsEditor lessonId={p.lessonId} words={p.words} onWords={p.onWords} actions={p.actions} />}
 

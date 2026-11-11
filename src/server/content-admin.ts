@@ -16,7 +16,7 @@ import { parseWordsCsv, type CsvRowError, type WordRow } from "@/lib/editor/word
  *  3. writes through the narrow `EditorDb` port (production: service-role RPC; tests: a fake).
  */
 
-export type Code = "forbidden" | "invalid" | "conflict" | "has_student_data" | "failed";
+export type Code = "forbidden" | "invalid" | "conflict" | "has_student_data" | "in_test" | "failed";
 export type Failure = { ok: false; code: Code; message: string; issues?: string[]; currentUpdatedAt?: string };
 export type Result<T> = ({ ok: true } & T) | Failure;
 
@@ -30,6 +30,8 @@ export interface BlockMeta {
   partId: string;
   type: string;
   published: boolean;
+  /** The block's exercise is an item of some test (published or not). */
+  inTest: boolean;
 }
 
 export interface EditorDb {
@@ -43,10 +45,11 @@ export interface EditorDb {
   saveLesson(actor: string, lesson: string, title: string, objective: string | null, expected: string): Promise<{ outcome: "ok" | "conflict"; updatedAt: string }>;
   createBlock(actor: string, part: string, type: BlockType, payload: Record<string, unknown>, exercise: ExerciseWrite | null): Promise<{ blockId: string; updatedAt: string }>;
   saveBlock(actor: string, block: string, payload: Record<string, unknown> | null, exercise: ExerciseWrite | null, expected: string): Promise<{ outcome: "ok" | "conflict"; updatedAt: string }>;
-  deleteBlock(actor: string, block: string): Promise<"ok" | "has_student_data">;
+  deleteBlock(actor: string, block: string): Promise<"ok" | "has_student_data" | "in_test">;
   reorderBlocks(actor: string, part: string, ids: string[]): Promise<void>;
-  setPublished(actor: string, lesson: string, published: boolean): Promise<number>;
-  lessonCheckData(lesson: string): Promise<{ parts: CheckPart[]; wordIds: string[] }>;
+  /** `checked` = {blockId: updated_at} as validated; the database refuses the publish if any block changed since. */
+  setPublished(actor: string, lesson: string, published: boolean, checked: Record<string, string>): Promise<number>;
+  lessonCheckData(lesson: string): Promise<{ parts: CheckPart[]; wordIds: string[]; tokens: Record<string, string> }>;
   lessonWords(lesson: string): Promise<EditorWord[]>;
   importWords(actor: string, lesson: string, rows: WordRow[]): Promise<{ inserted: number; linked: number; skipped: number }>;
   saveWord(actor: string, lesson: string, word: string | null, fields: WordFields): Promise<string>;
@@ -81,6 +84,10 @@ async function guarded<T>(fn: () => Promise<Result<T>>): Promise<Result<T>> {
   } catch (err) {
     if (err instanceof DbError && (err.code === "42501" || err.code === "P0002")) return FORBIDDEN;
     if (err instanceof DbError && err.code === "22023") return fail("invalid", "Ma'lumot noto'g'ri");
+    if (err instanceof DbError && err.code === "40001") return fail("conflict", "Dars tekshiruvdan keyin o'zgargan. Qayta urinib ko'ring.");
+    if (err instanceof DbError && err.code === "23514" && /type locked/.test(err.message)) {
+      return fail("invalid", "O'quvchilar bu mashqni bajargan: mashq turini o'zgartirib bo'lmaydi");
+    }
     if (err instanceof DbError && err.code === "23514") return fail("invalid", "Bu o'zgartirish mumkin emas");
     console.error("content-admin failed", { code: err instanceof DbError ? err.code : "unknown" });
     return fail("failed", "Xatolik yuz berdi, qayta urinib ko'ring");
@@ -145,7 +152,10 @@ function exerciseWriteFor(blockType: "exercise" | "speaking", draft: z.infer<typ
     return res.ok ? { ok: true, write: res.write } : fail("invalid", res.errors[0] ?? "Mashq noto'g'ri", { issues: res.errors });
   }
   const key = draft.key ?? null;
-  if (draft.type !== "speaking" && JSON.stringify(key ?? null).length > 100_000) return INVALID;
+  if (draft.type !== "speaking") {
+    // a draft may be incomplete, but its key must still be a real object: never erase a key with junk
+    if (typeof key !== "object" || key === null || JSON.stringify(key).length > 100_000) return fail("invalid", "To'g'ri javoblar formati noto'g'ri");
+  }
   return {
     ok: true,
     write: {
@@ -154,7 +164,7 @@ function exerciseWriteFor(blockType: "exercise" | "speaking", draft: z.infer<typ
       payload: sanitizePayload(draft.type, draft.payload),
       check_mode: draft.type === "speaking" ? "review" : "auto",
       xp: draft.xp,
-      key: draft.type === "speaking" ? null : typeof key === "object" ? key : null,
+      key: draft.type === "speaking" ? null : key,
     },
   };
 }
@@ -195,7 +205,8 @@ export function saveBlockFn(db: EditorDb, actor: string, input: unknown) {
     let exercise: ExerciseWrite | null = null;
     if (meta.type === "exercise" || meta.type === "speaking") {
       if (!p.data.exercise) return INVALID;
-      const w = exerciseWriteFor(meta.type, p.data.exercise, meta.published);
+      // live exercises (published block, or an item of any test) must always stay complete and valid
+      const w = exerciseWriteFor(meta.type, p.data.exercise, meta.published || meta.inTest);
       if (!w.ok) return w;
       exercise = w.write;
     } else {
@@ -265,6 +276,7 @@ export function deleteBlockFn(db: EditorDb, actor: string, input: unknown) {
     if (!meta || !(await allowed(db, actor, meta.courseId))) return FORBIDDEN;
     const r = await db.deleteBlock(actor, p.data.blockId);
     if (r === "has_student_data") return fail("has_student_data", "O'quvchilar bu mashqni bajargan: o'chirib bo'lmaydi");
+    if (r === "in_test") return fail("in_test", "Bu mashq testda ishlatilgan: avval testdan olib tashlang");
     return { ok: true };
   });
 }
@@ -285,13 +297,15 @@ export function setPublishedFn(db: EditorDb, actor: string, input: unknown) {
     if (!p.success) return INVALID;
     if (!(await allowed(db, actor, await db.courseOfLesson(p.data.lessonId)))) return FORBIDDEN;
     let warnings: string[] = [];
+    let tokens: Record<string, string> = {};
     if (p.data.published) {
       const data = await db.lessonCheckData(p.data.lessonId);
       const check = checkLessonForPublish(data.parts, data.wordIds.length, new Set(data.wordIds));
       if (check.errors.length > 0) return fail("invalid", "Dars nashr qilishga tayyor emas", { issues: check.errors });
       warnings = check.warnings;
+      tokens = data.tokens;
     }
-    await db.setPublished(actor, p.data.lessonId, p.data.published);
+    await db.setPublished(actor, p.data.lessonId, p.data.published, tokens);
     return { ok: true, warnings };
   });
 }
@@ -348,9 +362,13 @@ export function unlinkWordFn(db: EditorDb, actor: string, input: unknown) {
 export const UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const EXT: Record<string, string> = {
   "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
   "audio/mp4": "m4a",
+  "audio/x-m4a": "m4a",
   "audio/ogg": "ogg",
   "audio/wav": "wav",
+  "audio/x-wav": "wav",
+  "audio/wave": "wav",
   "audio/webm": "webm",
   "image/png": "png",
   "image/jpeg": "jpg",
@@ -364,10 +382,12 @@ export function requestUploadFn(db: EditorDb, actor: string, input: unknown) {
       .safeParse(input);
     if (!p.success) return INVALID;
     if (p.data.size > UPLOAD_MAX_BYTES) return fail("invalid", "Fayl 20 MB dan katta");
-    const ext = EXT[p.data.contentType];
-    if (!ext || !p.data.contentType.startsWith(p.data.kind === "audio" ? "audio/" : "image/")) return fail("invalid", "Fayl turi qo'llab-quvvatlanmaydi");
+    const mime = p.data.contentType.split(";")[0].trim().toLowerCase();
+    const ext = EXT[mime];
+    if (!ext || !mime.startsWith(p.data.kind === "audio" ? "audio/" : "image/")) return fail("invalid", "Fayl turi qo'llab-quvvatlanmaydi");
     const course = await db.courseOfLesson(p.data.lessonId);
     if (!(await allowed(db, actor, course))) return FORBIDDEN;
+    // NOTE: replacing a file uploads a NEW object; the old one stays in the bucket (orphaned) until a cleanup job exists.
     const path = `${course}/${randomUUID()}.${ext}`;
     const target = await db.signUpload(path);
     if (!target) return fail("failed", "Yuklash hozir mavjud emas");
@@ -439,7 +459,9 @@ export function supabaseEditorDb(sb: SupabaseClient): EditorDb {
       const lesson = part ? one(part.lessons) : null;
       const courseId = lesson ? (one(lesson.modules)?.course_id ?? null) : null;
       if (!b || !part || !courseId) return null;
-      return { courseId, lessonId: part.lesson_id, partId: b.lesson_part_id, type: b.type, published: b.published };
+      const ex = ok<{ id: string }[] | null>(await sb.from("exercises").select("id").eq("block_id", id), "block exercises") ?? [];
+      const inTest = ex.length > 0 && ((ok<{ exercise_id: string }[] | null>(await sb.from("test_items").select("exercise_id").in("exercise_id", ex.map((e) => e.id)).limit(1), "block test items")) ?? []).length > 0;
+      return { courseId, lessonId: part.lesson_id, partId: b.lesson_part_id, type: b.type, published: b.published, inTest };
     },
     async createModule(actor, course, title) {
       return rpc<string>("editor_create_module", { p_actor: actor, p_course: course, p_title: title });
@@ -466,13 +488,13 @@ export function supabaseEditorDb(sb: SupabaseClient): EditorDb {
       return { outcome: rows[0].outcome, updatedAt: rows[0].updated_at };
     },
     async deleteBlock(actor, block) {
-      return rpc<"ok" | "has_student_data">("editor_delete_block", { p_actor: actor, p_block: block });
+      return rpc<"ok" | "has_student_data" | "in_test">("editor_delete_block", { p_actor: actor, p_block: block });
     },
     async reorderBlocks(actor, part, ids) {
       await rpc<unknown>("editor_reorder_blocks", { p_actor: actor, p_part: part, p_ids: ids });
     },
-    async setPublished(actor, lesson, published) {
-      return rpc<number>("editor_set_lesson_published", { p_actor: actor, p_lesson: lesson, p_published: published });
+    async setPublished(actor, lesson, published, checked) {
+      return rpc<number>("editor_set_lesson_published", { p_actor: actor, p_lesson: lesson, p_published: published, p_checked: published ? checked : null });
     },
     async lessonCheckData(lesson) {
       const parts = ok<{ id: string; position: number; title: string }[] | null>(
@@ -481,8 +503,8 @@ export function supabaseEditorDb(sb: SupabaseClient): EditorDb {
       ) ?? [];
       const partIds = parts.map((p) => p.id);
       const blocks = partIds.length
-        ? (ok<{ id: string; lesson_part_id: string; position: number; type: string; payload: unknown }[] | null>(
-            await sb.from("blocks").select("id, lesson_part_id, position, type, payload").in("lesson_part_id", partIds).order("position"),
+        ? (ok<{ id: string; lesson_part_id: string; position: number; type: string; payload: unknown; updated_at: string }[] | null>(
+            await sb.from("blocks").select("id, lesson_part_id, position, type, payload, updated_at").in("lesson_part_id", partIds).order("position"),
             "blocks",
           ) ?? [])
         : [];
@@ -504,6 +526,7 @@ export function supabaseEditorDb(sb: SupabaseClient): EditorDb {
       const inTest = new Set(testItems.map((t) => t.exercise_id));
       const words = ok<{ word_id: string }[] | null>(await sb.from("lesson_words").select("word_id").eq("lesson_id", lesson), "lesson words") ?? [];
       return {
+        tokens: Object.fromEntries(blocks.map((b) => [b.id, b.updated_at])),
         wordIds: words.map((w) => w.word_id),
         parts: parts.map((p) => ({
           position: p.position,

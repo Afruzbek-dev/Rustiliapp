@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Plus, Trash2, Upload } from "lucide-react";
 import { Button, IconButton } from "@/components/ui";
 import { parseYouTubeId, type EditorWord } from "@/lib/editor/types";
@@ -61,6 +61,7 @@ export const MAX_UPLOAD = 20 * 1024 * 1024;
 
 export function MediaForm({ kind, lessonId, value, onChange, actions, uploader }: MediaFormProps) {
   const input = useRef<HTMLInputElement>(null);
+  const uid = useId();
   const [state, setState] = useState<"idle" | "uploading" | "error">("idle");
   const [error, setError] = useState("");
   const path = str(value.path);
@@ -106,7 +107,7 @@ export function MediaForm({ kind, lessonId, value, onChange, actions, uploader }
           ref={input}
           type="file"
           className="sr-only"
-          id={`upload-${kind}`}
+          id={`${uid}-upload`}
           accept={ACCEPT[kind]}
           aria-label={kind === "audio" ? "Audio faylni tanlash" : "Rasmni tanlash"}
           onChange={(e) => void pick(e.target.files?.[0])}

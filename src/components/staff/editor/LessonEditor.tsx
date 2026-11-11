@@ -24,6 +24,14 @@ export interface LessonEditorProps {
   now?: () => number;
 }
 
+/** Orders blocks by `ids`; blocks not listed (added meanwhile) keep their relative order at the end. */
+export function applyOrder(blocks: EditorBlock[], ids: string[]): EditorBlock[] {
+  const byId = new Map(blocks.map((b) => [b.id, b]));
+  const ordered = ids.flatMap((id) => (byId.has(id) ? [byId.get(id) as EditorBlock] : []));
+  const listed = new Set(ids);
+  return [...ordered, ...blocks.filter((b) => !listed.has(b.id))];
+}
+
 export function formatAgo(ms: number): string {
   const min = Math.floor(ms / 60000);
   if (min < 1) return "hozirgina saqlandi";
@@ -60,6 +68,11 @@ export function LessonEditor({ data, actions, uploader, reload, now = Date.now }
   const [publishIssues, setPublishIssues] = useState<string[]>([]);
   const [publishing, setPublishing] = useState(false);
   const flushers = useRef(new Map<string, () => Promise<boolean>>());
+  // Reorders are SERIALISED and each failure rolls back to the last order the server confirmed.
+  const confirmedOrder = useRef<Record<string, string[]>>(Object.fromEntries(lesson.parts.map((p) => [p.id, p.blocks.map((b) => b.id)])));
+  const reorderQueue = useRef<Promise<void>>(Promise.resolve());
+  const pendingReorders = useRef(0);
+  const desiredOrder = useRef<Record<string, string[]>>({});
 
   // keep the relative time fresh
   useEffect(() => {
@@ -133,19 +146,38 @@ export function LessonEditor({ data, actions, uploader, reload, now = Date.now }
     }
     const block = defaultBlock(r.blockId, type as BlockType, r.updatedAt);
     setParts((ps) => ps.map((p) => (p.id === current.id ? { ...p, blocks: [...p.blocks, block] } : p)));
+    confirmedOrder.current[current.id] = [...(confirmedOrder.current[current.id] ?? []), block.id];
     setSelected((s) => ({ ...s, [current.id]: block.id }));
   }
 
-  async function reorder(ids: string[]) {
-    if (!current) return;
-    const before = current.blocks;
+  function reorder(ids: string[]): Promise<void> {
+    if (!current) return Promise.resolve();
+    const partId = current.id;
+    desiredOrder.current[partId] = ids;
     setNotice(null);
-    setParts((ps) => ps.map((p) => (p.id === current.id ? { ...p, blocks: ids.map((id) => p.blocks.find((b) => b.id === id) as EditorBlock) } : p)));
-    const r = await actions.reorderBlocks({ partId: current.id, ids });
-    if (!r.ok) {
-      setParts((ps) => ps.map((p) => (p.id === current.id ? { ...p, blocks: before } : p)));
-      setNotice({ tone: "error", text: `Tartibni saqlab bo'lmadi: ${r.message}` });
-    } else setSavedAt(now());
+    setParts((ps) => ps.map((p) => (p.id === partId ? { ...p, blocks: applyOrder(p.blocks, ids) } : p)));
+    const run = async () => {
+      // blocks added / deleted meanwhile are part of the order the server must see
+      const members = confirmedOrder.current[partId] ?? [];
+      const want = desiredOrder.current[partId] ?? ids;
+      const send = [...want.filter((id) => members.includes(id)), ...members.filter((id) => !want.includes(id))];
+      const r = await actions.reorderBlocks({ partId, ids: send });
+      if (r.ok) {
+        confirmedOrder.current[partId] = send;
+        setSavedAt(now());
+      } else {
+        const back = confirmedOrder.current[partId] ?? [];
+        setParts((ps) => ps.map((p) => (p.id === partId ? { ...p, blocks: applyOrder(p.blocks, back) } : p)));
+        setNotice({ tone: "error", text: `Tartibni saqlab bo'lmadi: ${r.message}` });
+      }
+    };
+    // idle: start right away; otherwise queue behind the reorders still in flight
+    const result = pendingReorders.current === 0 ? run() : reorderQueue.current.then(run, run);
+    pendingReorders.current++;
+    reorderQueue.current = result.finally(() => {
+      pendingReorders.current--;
+    });
+    return reorderQueue.current;
   }
 
   const deleteBlock = useCallback(
@@ -153,6 +185,7 @@ export function LessonEditor({ data, actions, uploader, reload, now = Date.now }
       const r = await actions.deleteBlock({ blockId: id });
       if (!r.ok) return r.message;
       setParts((ps) => ps.map((p) => ({ ...p, blocks: p.blocks.filter((b) => b.id !== id) })));
+      for (const k of Object.keys(confirmedOrder.current)) confirmedOrder.current[k] = confirmedOrder.current[k].filter((x) => x !== id);
       setSelected((s) => Object.fromEntries(Object.entries(s).map(([k, v]) => [k, v === id ? null : v])));
       setStates((s) => {
         const { [id]: _gone, ...rest } = s;
@@ -218,7 +251,8 @@ export function LessonEditor({ data, actions, uploader, reload, now = Date.now }
           )}
           <div className="flex flex-wrap items-center gap-2">
             <Chip tone={failed ? "fire" : STATUS_TONE[status]}>
-              <span role="status">{statusText}</span>
+              {/* Only real state changes are announced; the 30 s "N daqiqa oldin" tick must not be. */}
+              <span {...(busy || failed ? { role: "status" } : { "aria-live": "off" as const })}>{statusText}</span>
             </Chip>
             {current && current.blocks.length > 0 ? (
               <a

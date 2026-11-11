@@ -11,6 +11,8 @@ export interface EditorExercise {
   xp: number;
   /** The exercise is also an item of a test (reusing it as a test item is warned about). */
   isTestItem: boolean;
+  /** Students already answered it: its type can no longer be changed. */
+  typeLocked?: boolean;
 }
 
 export interface EditorBlock {

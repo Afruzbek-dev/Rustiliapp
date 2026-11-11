@@ -28,8 +28,18 @@ export interface WordsCsvResult {
 }
 
 /** RFC 4180 style parser: quoted fields, "" escapes, CRLF/LF/CR, embedded newlines. Returns lines with their start line number. */
-export function parseCsv(text: string, delimiter: string): { cells: string[]; line: number }[] {
-  const out: { cells: string[]; line: number }[] = [];
+/** A quoted field longer than this (or never closed) is a broken row, not the rest of the file. */
+export const CSV_MAX_QUOTED = 1000;
+
+export interface ParsedCsvRow {
+  cells: string[];
+  line: number;
+  /** Set when the row has an unterminated quote; the parser resumed at the next line. */
+  error?: string;
+}
+
+export function parseCsv(text: string, delimiter: string): ParsedCsvRow[] {
+  const out: ParsedCsvRow[] = [];
   let cells: string[] = [];
   let cur = "";
   let quoted = false;
@@ -40,11 +50,24 @@ export function parseCsv(text: string, delimiter: string): { cells: string[]; li
     cells.push(cur);
     cur = "";
   };
+  let rowError: string | undefined;
   const endRow = () => {
     endCell();
-    if (touched) out.push({ cells, line: startLine });
+    if (touched) out.push(rowError ? { cells, line: startLine, error: rowError } : { cells, line: startLine });
     cells = [];
     touched = false;
+    rowError = undefined;
+  };
+  // Is the quote opened at `from` closed (an unescaped quote) within the cap?
+  const closes = (from: number): boolean => {
+    const end = Math.min(text.length, from + 1 + CSV_MAX_QUOTED);
+    for (let j = from + 1; j < end; j++) {
+      if (text[j] === '"') {
+        if (text[j + 1] === '"') j++;
+        else return true;
+      }
+    }
+    return false;
   };
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
@@ -61,8 +84,13 @@ export function parseCsv(text: string, delimiter: string): { cells: string[]; li
       continue;
     }
     if (ch === '"' && cur === "") {
-      quoted = true;
       touched = true;
+      if (closes(i)) quoted = true;
+      else {
+        // unterminated quote: drop the rest of THIS physical line, flag the row and carry on
+        rowError = "Yopilmagan qo'shtirnoq";
+        while (i + 1 < text.length && text[i + 1] !== "\n" && text[i + 1] !== "\r") i++;
+      }
     } else if (ch === delimiter) {
       touched = true;
       endCell();
@@ -114,6 +142,10 @@ export function parseWordsCsv(input: string): WordsCsvResult {
   const seen = new Set<string>();
   let duplicates = 0;
   for (const r of body) {
+    if (r.error) {
+      errors.push({ line: r.line, message: r.error });
+      continue;
+    }
     if (r.cells.every((c) => c.trim() === "")) continue;
     const row = Object.fromEntries(WORD_COLUMNS.map((c) => [c, (r.cells[index.get(c) ?? -1] ?? "").trim()])) as WordRow;
     if (!row.ru) {

@@ -58,7 +58,7 @@ export class FakeEditorDb implements EditorDb {
   async blockMeta(i: string): Promise<BlockMeta | null> {
     const b = this.blocks.find((x) => x.id === i);
     if (!b) return null;
-    return { courseId: this.course(b.part) as string, lessonId: this.course(b.part) === FakeEditorDb.C1 ? FakeEditorDb.L1 : FakeEditorDb.L2, partId: b.part, type: b.type, published: b.published };
+    return { courseId: this.course(b.part) as string, lessonId: this.course(b.part) === FakeEditorDb.C1 ? FakeEditorDb.L1 : FakeEditorDb.L2, partId: b.part, type: b.type, published: b.published, inTest: b.exercise?.isTestItem ?? false };
   }
   async createModule() {
     return id(this.nextId++);
@@ -89,6 +89,7 @@ export class FakeEditorDb implements EditorDb {
     return { outcome: "ok" as const, updatedAt: String(b.updatedAt) };
   }
   async deleteBlock(_a: string, block: string) {
+    if (this.blocks.find((x) => x.id === block)?.exercise?.isTestItem) return "in_test" as const;
     this.blocks = this.blocks.filter((x) => x.id !== block);
     return "ok" as const;
   }
@@ -98,12 +99,14 @@ export class FakeEditorDb implements EditorDb {
       if (b) b.position = n + 1;
     });
   }
-  async setPublished(_a: string, lesson: string, published: boolean) {
+  lastChecked: Record<string, string> | null = null;
+  async setPublished(_a: string, lesson: string, published: boolean, checked: Record<string, string>) {
+    this.lastChecked = checked;
     this.published.set(lesson, published);
     this.blocks.forEach((b) => (b.published = published));
     return this.blocks.length;
   }
-  async lessonCheckData(): Promise<{ parts: CheckPart[]; wordIds: string[] }> {
+  async lessonCheckData(): Promise<{ parts: CheckPart[]; wordIds: string[]; tokens: Record<string, string> }> {
     const mk = (part: string, title: string, position: number): CheckPart => ({
       position, title,
       blocks: this.blocks.filter((b) => b.part === part).sort((a, b) => a.position - b.position).map((b) => ({
@@ -111,7 +114,7 @@ export class FakeEditorDb implements EditorDb {
         exercise: b.exercise ? { id: b.exercise.id, type: b.exercise.type, prompt: b.exercise.prompt, payload: b.exercise.payload, key: b.exercise.key, xp: b.exercise.xp, isTestItem: b.exercise.isTestItem } : null,
       })),
     });
-    return { parts: [mk(FakeEditorDb.P1, "Grammatika", 1), mk(FakeEditorDb.P2, "Razgovor", 2)], wordIds: this.words.map((w) => w.id) };
+    return { parts: [mk(FakeEditorDb.P1, "Grammatika", 1), mk(FakeEditorDb.P2, "Razgovor", 2)], wordIds: this.words.map((w) => w.id), tokens: Object.fromEntries(this.blocks.map((b) => [b.id, String(b.updatedAt)])) };
   }
   async lessonWords() {
     return this.words;

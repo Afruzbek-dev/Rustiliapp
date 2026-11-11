@@ -74,6 +74,20 @@ describe("parseWordsCsv", () => {
     expect(r.errors).toHaveLength(2);
   });
 
+  it("reports a row with an unterminated quote and keeps importing the following rows (does not swallow the file)", () => {
+    const lines = ["ru,uz", "дом,uy", 'стол,"stol', "окно,oyna", "книга,kitob"];
+    const r = parseWordsCsv(lines.join("\n"));
+    expect(r.errors).toEqual([{ line: 3, message: "Yopilmagan qo'shtirnoq" }]);
+    expect(r.rows.map((x) => x.ru)).toEqual(["дом", "окно", "книга"]);
+  });
+
+  it("caps a quoted field so a stray quote cannot swallow a long file", () => {
+    const filler = Array.from({ length: 300 }, (_, i) => `w${i},t${i}`).join("\n");
+    const r = parseWordsCsv(`ru,uz\nдом,"uy\n${filler}`);
+    expect(r.errors).toHaveLength(1);
+    expect(r.rows.length).toBe(300);
+  });
+
   it("header only gives no rows and no error", () => {
     expect(parseWordsCsv("ru,uz\n")).toMatchObject({ rows: [], errors: [] });
   });
@@ -82,7 +96,13 @@ describe("parseWordsCsv", () => {
 describe("parseCsv", () => {
   it("handles a trailing line without newline and unterminated quotes", () => {
     expect(parseCsv("a,b\nc,d", ",").map((r) => r.cells)).toEqual([["a", "b"], ["c", "d"]]);
-    expect(parseCsv('a,"b\nc', ",").map((r) => r.cells)).toEqual([["a", "b\nc"]]);
+  });
+
+  it("an unterminated quote breaks only its own row; following lines are still parsed", () => {
+    const rows = parseCsv('a,"b\nc,d\ne,f', ",");
+    expect(rows).toHaveLength(3);
+    expect(rows[0].error).toBeDefined();
+    expect(rows.slice(1).map((r) => r.cells)).toEqual([["c", "d"], ["e", "f"]]);
   });
 });
 

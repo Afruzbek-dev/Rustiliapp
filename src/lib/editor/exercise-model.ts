@@ -1,7 +1,16 @@
 import { PRONOUNS } from "@/lib/exercises/types";
 
 /** Form models of the five authorable exercise types and their conversion to / from payload + key. */
-export const genId = () => Math.random().toString(36).slice(2, 8);
+/**
+ * Random, mutually independent identifiers (crypto-random, NOT derived from any other id or text):
+ * item / bucket / pair ids are visible to students in the payload, so they must never encode
+ * anything about the answer key.
+ */
+export const genId = (): string => {
+  const bytes = new Uint8Array(6);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(36).padStart(2, "0")).join("").slice(0, 10);
+};
 
 const o = (v: unknown): Record<string, unknown> => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 const a = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
@@ -22,10 +31,13 @@ export interface ChooseModel {
   items: { id: string; text: string; options: string[]; correct: number }[];
 }
 export interface MatchModel {
-  pairs: { id: string; left: string; right: string }[];
+  /** id = left item id; rightId = INDEPENDENT random id of the right item (never derived from id). */
+  pairs: { id: string; rightId: string; left: string; right: string }[];
 }
 
 export const ANSWER_SEPARATOR = "|";
+
+export const newPair = (): MatchModel["pairs"][number] => ({ id: genId(), rightId: genId(), left: "", right: "" });
 
 export function emptyModel(type: string): unknown {
   switch (type) {
@@ -38,7 +50,7 @@ export function emptyModel(type: string): unknown {
     case "choose":
       return { items: [{ id: genId(), text: "", options: ["", ""], correct: -1 }] } satisfies ChooseModel;
     default:
-      return { pairs: [{ id: genId(), left: "", right: "" }, { id: genId(), left: "", right: "" }] } satisfies MatchModel;
+      return { pairs: [newPair(), newPair()] } satisfies MatchModel;
   }
 }
 
@@ -73,20 +85,13 @@ export function modelFromDraft(type: string, payload: unknown, key: unknown): un
     default: {
       const right = a(p.right).map((r) => ({ id: s(o(r).id), text: s(o(r).text) }));
       return {
-        pairs: a(p.left).map((l) => ({
-          id: s(o(l).id), left: s(o(l).text), right: right.find((r) => r.id === k[s(o(l).id)])?.text ?? "",
-        })),
+        pairs: a(p.left).map((l) => {
+          const rid = s(k[s(o(l).id)]);
+          return { id: s(o(l).id), rightId: rid || genId(), left: s(o(l).text), right: right.find((r) => r.id === rid)?.text ?? "" };
+        }),
       } satisfies MatchModel;
     }
   }
-}
-
-/** Deterministic scramble so the right column never lists answers in the same order as the left. */
-function scatter<T extends { text: string }>(items: T[]): T[] {
-  const hash = (t: string) => [...t].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
-  const out = [...items].sort((x, y) => hash(x.text) - hash(y.text));
-  if (items.length > 1 && out.every((x, i) => x === items[i])) out.reverse();
-  return out;
 }
 
 export function draftFromModel(type: string, model: unknown): { payload: Record<string, unknown>; key: unknown } {
@@ -119,10 +124,13 @@ export function draftFromModel(type: string, model: unknown): { payload: Record<
     }
     default: {
       const mm = m as unknown as MatchModel;
-      const right = scatter(mm.pairs.map((p) => ({ id: `r${p.id}`, text: p.right })));
+      // The right column is ordered by its random ids: stable across saves, independent of the left
+      // order and of the left ids, so neither ids nor positions reveal which right item matches.
+      const right = mm.pairs.map((p) => ({ id: p.rightId, text: p.right })).sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+      if (mm.pairs.length > 1 && right.every((r, i) => r.id === mm.pairs[i].rightId)) right.reverse();
       return {
         payload: { left: mm.pairs.map((p) => ({ id: p.id, text: p.left })), right },
-        key: Object.fromEntries(mm.pairs.map((p) => [p.id, `r${p.id}`])),
+        key: Object.fromEntries(mm.pairs.map((p) => [p.id, p.rightId])),
       };
     }
   }

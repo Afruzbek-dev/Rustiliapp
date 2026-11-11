@@ -1,58 +1,18 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   displayName,
+  handleCancel,
   handleExchange,
   handleStart,
   handleStatus,
   maskPhone,
+  originAllowed,
   type AuthDeps,
-  type AuthStore,
-  type NonceRow,
-  type ProfileRow,
 } from "@/server/auth";
+import { fakeStore, sha, SEED, GOOD_USER, type Seed } from "./auth-fake-store";
 
-const sha = (v: string) => createHash("sha256").update(v).digest("hex");
-
-function fakeStore(seed: { profiles?: Record<number, ProfileRow>; emails?: Record<string, string> } = {}) {
-  const nonces = new Map<string, NonceRow>();
-  const calls = { consume: 0, generate: 0 };
-  const store: AuthStore = {
-    async insertNonce(r) {
-      nonces.set(r.nonce, { status: "created", telegramId: null, expiresAt: r.expiresAt, verifierHash: r.verifierHash });
-    },
-    async purgeStale() {},
-    async getNonce(n) {
-      return nonces.get(n) ?? null;
-    },
-    async getProfileByTelegramId(id) {
-      return seed.profiles?.[id] ?? null;
-    },
-    async consumeNonce(n, h) {
-      calls.consume++;
-      const row = nonces.get(n);
-      if (!row || row.status !== "confirmed" || row.verifierHash !== h || Date.parse(row.expiresAt) <= Date.now()) return null;
-      row.status = "consumed";
-      return { telegramId: row.telegramId! };
-    },
-    async getAuthEmail(id) {
-      return seed.emails?.[id] ?? null;
-    },
-    async generateTokenHash(email) {
-      calls.generate++;
-      return `hash-for-${email}`;
-    },
-  };
-  return { store, nonces, calls };
-}
-
-const PROFILE: ProfileRow = { id: "uid-1", fullName: "Dilnoza Abdullayeva", phone: "+998901234547" };
-const ENV = { profiles: { 555: PROFILE }, emails: { "uid-1": "tg_555@users.internal" } };
-
-function setup(seed: { profiles?: Record<number, ProfileRow>; emails?: Record<string, string> } = ENV) {
-  const f = fakeStore(seed);
-  const deps: AuthDeps = { store: f.store, botUsername: () => "po_russki_bot", matchCode: () => "47" };
-  return { ...f, deps };
+function setup(seed: Seed = SEED) {
+  return fakeStore(seed);
 }
 
 async function started(deps: AuthDeps) {
@@ -129,7 +89,7 @@ describe("GET /status", () => {
   });
 
   it("confirmed without a profile -> identity null", async () => {
-    const t = setup({ profiles: {}, emails: {} });
+    const t = setup({ profiles: {}, users: {} });
     const { json, cookie } = await started(t.deps);
     Object.assign(t.nonces.get(json.nonce)!, { status: "confirmed", telegramId: 999 });
     const res = await handleStatus(t.deps, { nonce: json.nonce, cookie });
@@ -200,6 +160,55 @@ describe("POST /exchange", () => {
     expect(t.calls.consume).toBe(1);
   });
 
+  describe("untrusted auth user (profiles.telegram_id points at a foreign account)", () => {
+    const cases: [string, Seed["users"]][] = [
+      ["telegram_id mismatch", { "uid-1": { ...GOOD_USER, appTelegramId: 556 } }],
+      ["missing app_metadata (user_metadata-only)", { "uid-1": { ...GOOD_USER, appTelegramId: undefined } }],
+      ["unconfirmed email", { "uid-1": { ...GOOD_USER, emailConfirmedAt: null } }],
+      ["no email", { "uid-1": { ...GOOD_USER, email: null } }],
+      ["no auth user", {}],
+    ];
+    for (const [name, users] of cases) {
+      it(`${name} -> 409 no_profile, nothing consumed or minted`, async () => {
+        const t = setup({ profiles: SEED.profiles, users });
+        const { json, cookie } = await confirmed(t);
+        const res = await handleExchange(t.deps, { body: body(json.nonce), cookie });
+        expect(res).toMatchObject({ status: 409, json: { error: "no_profile" } });
+        expect(t.nonces.get(json.nonce)!.status).toBe("confirmed");
+        expect(t.calls.consume).toBe(0);
+        expect(t.calls.generate).toBe(0);
+      });
+    }
+
+    it("compares telegram ids as strings (bigint vs number vs string)", async () => {
+      const t = setup({ profiles: SEED.profiles, users: { "uid-1": { ...GOOD_USER, appTelegramId: "555" } } });
+      const { json, cookie } = await confirmed(t);
+      expect((await handleExchange(t.deps, { body: body(json.nonce), cookie })).status).toBe(200);
+    });
+  });
+
+  it("a failed token mint reverts the consume so the attempt can be retried", async () => {
+    const t = setup();
+    const { json, cookie } = await confirmed(t);
+    t.store.generateTokenHash = async () => null;
+    const res = await handleExchange(t.deps, { body: body(json.nonce), cookie });
+    expect(res.status).toBe(500);
+    expect(t.calls.revert).toBe(1);
+    expect(t.nonces.get(json.nonce)!.status).toBe("confirmed");
+  });
+
+  it("consume happens before the token is minted", async () => {
+    const t = setup();
+    const { json, cookie } = await confirmed(t);
+    const order: string[] = [];
+    const c = t.store.consumeNonce;
+    t.store.consumeNonce = async (n, h) => (order.push("consume"), c(n, h));
+    const g = t.store.generateTokenHash;
+    t.store.generateTokenHash = async (e) => (order.push("mint"), g(e));
+    await handleExchange(t.deps, { body: body(json.nonce), cookie });
+    expect(order).toEqual(["consume", "mint"]);
+  });
+
   it("a lost consume race returns 409 and no tokenHash", async () => {
     const t = setup();
     const { json, cookie } = await confirmed(t);
@@ -225,5 +234,43 @@ describe("identity formatting", () => {
     expect(maskPhone("+998901234547")).toBe("+998 90 *** ** 47");
     expect(maskPhone("+79161234567")).toBe("+791 *** ** 67");
     expect(maskPhone(null)).toBe("+*** *** ** **");
+  });
+});
+
+describe("POST /cancel", () => {
+  it("deletes the row for the cookie holder only and clears the cookie", async () => {
+    const t = setup();
+    const { json, cookie } = await started(t.deps);
+    expect((await handleCancel(t.deps, { body: { nonce: json.nonce }, cookie: "other" })).status).toBe(404);
+    expect(t.nonces.has(json.nonce)).toBe(true);
+    const res = await handleCancel(t.deps, { body: { nonce: json.nonce }, cookie });
+    expect(res).toMatchObject({ status: 200, cookie: { clear: true } });
+    expect(t.nonces.has(json.nonce)).toBe(false);
+    expect((await handleStatus(t.deps, { nonce: json.nonce, cookie })).json).toEqual({ status: "expired" });
+  });
+});
+
+describe("cleanup and origin rule", () => {
+  it("/start purges only occasionally", async () => {
+    const t = setup();
+    t.deps.random = () => 0.5;
+    await handleStart(t.deps);
+    expect(t.calls.purge).toBe(0);
+    t.deps.random = () => 0.001;
+    await handleStart(t.deps);
+    expect(t.calls.purge).toBe(1);
+  });
+
+  it("originAllowed", () => {
+    const o = "https://app.example.com";
+    const h = (x: Record<string, string>) => new Headers(x);
+    expect(originAllowed(h({ "sec-fetch-site": "same-origin" }), o)).toBe(true);
+    expect(originAllowed(h({ "sec-fetch-site": "same-site" }), o)).toBe(true);
+    expect(originAllowed(h({ "sec-fetch-site": "none" }), o)).toBe(true);
+    expect(originAllowed(h({ "sec-fetch-site": "cross-site" }), o)).toBe(false);
+    expect(originAllowed(h({ "sec-fetch-site": "cross-site", origin: o }), o)).toBe(true);
+    expect(originAllowed(h({ origin: "https://evil.example" }), o)).toBe(false);
+    expect(originAllowed(h({ origin: o }), o)).toBe(true);
+    expect(originAllowed(h({}), o)).toBe(true);
   });
 });

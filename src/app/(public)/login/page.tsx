@@ -31,7 +31,11 @@ export default async function LoginPage() {
         <h1 className="text-3xl font-extrabold">Kirish</h1>
         <p className="text-ink-2">Telegram orqali xavfsiz kiring — parol kerak emas.</p>
       </header>
-      {view.kind === "pending" ? <PendingState telegramUrl={botUrl()} /> : <LoginFlow />}
+      {view.kind === "pending" || view.kind === "closed" ? (
+        <PendingState telegramUrl={botUrl()} closed={view.kind === "closed"} />
+      ) : (
+        <LoginFlow />
+      )}
     </main>
   );
 }

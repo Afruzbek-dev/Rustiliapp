@@ -21,9 +21,10 @@ const defaultNavigate = (to: string) => window.location.assign(to);
 
 const STEPS = ["Botni oching", "Telefon raqamni ulashing", "Tasdiqlang"] as const;
 
-const LIVE: Record<Phase, string> = {
+const LIVE: Record<Phase | "waiting_opened", string> = {
   starting: "Havola tayyorlanmoqda",
-  waiting: "Telegram'da botni oching va telefon raqamingizni ulashing",
+  waiting: "Botni oching: Telegram'da botni oching va Start tugmasini bosing",
+  waiting_opened: "Telefon raqamni ulashing: botda Raqamni ulashish tugmasini bosing",
   confirmed: "Bot sizni tanidi. Bu siz ekaningizni tasdiqlang",
   exchanging: "Kirilmoqda",
   no_profile: "Telefon raqam ulashilmagan",
@@ -171,7 +172,8 @@ export function LoginFlow({ navigate = defaultNavigate }: LoginFlowProps) {
       if (res.ok) {
         const { tokenHash } = (await res.json()) as { tokenHash: string };
         const { error } = await createClient().auth.verifyOtp({ token_hash: tokenHash, type: "magiclink" });
-        if (error) throw new Error("verify");
+        // The nonce is consumed and the cookie cleared, so a retry is impossible: start over.
+        if (error) return setPhase("expired");
         setPhase("done");
         navigate("/login");
         return;
@@ -186,13 +188,27 @@ export function LoginFlow({ navigate = defaultNavigate }: LoginFlowProps) {
     }
   }
 
+  async function cancelLogin() {
+    // Best effort: tell the server to drop the row, then start over regardless of the answer.
+    // Awaited so the cancel's cookie-clearing response cannot land after the new start's cookie.
+    if (session) {
+      await fetch("/api/auth/telegram/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ nonce: session.nonce }),
+      }).catch(() => undefined);
+    }
+    restart();
+  }
+
   const step = phase === "confirmed" || phase === "exchanging" || phase === "done" ? 3 : opened ? 2 : 1;
   const failed = phase === "no_profile" || phase === "expired" || phase === "error";
 
   return (
     <div className="flex flex-col gap-6">
       <p role="status" aria-live="polite" className="sr-only">
-        {LIVE[phase]}
+        {phase === "waiting" && opened ? LIVE.waiting_opened : LIVE[phase]}
       </p>
 
       <ol className="flex items-center gap-2" aria-label="Qadamlar">
@@ -274,7 +290,7 @@ export function LoginFlow({ navigate = defaultNavigate }: LoginFlowProps) {
             <Button fullWidth size="lg" loading={phase === "exchanging"} onClick={confirmLogin}>
               Ha, kirish
             </Button>
-            <Button fullWidth variant="secondary" disabled={phase === "exchanging"} onClick={restart}>
+            <Button fullWidth variant="secondary" disabled={phase === "exchanging"} onClick={cancelLogin}>
               Yo&apos;q, bekor qilish
             </Button>
           </Panel>

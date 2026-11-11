@@ -18,10 +18,11 @@ const GROUP = "55555555-5555-4555-8555-555555555555";
 const PART = "66666666-6666-4666-8666-666666666666";
 const NEWID = "77777777-7777-4777-8777-777777777777";
 
-function setup(over: { limited?: boolean; failPartOnce?: boolean; exercise?: Partial<SpeakingExercise> | null; testItem?: boolean; enrolled?: boolean; role?: string } = {}) {
+function setup(over: { failMarkNotified?: boolean; limited?: boolean; failPartOnce?: boolean; exercise?: Partial<SpeakingExercise> | null; testItem?: boolean; enrolled?: boolean; role?: string } = {}) {
   const subs = new Map<string, AudioSubmissionRow & { createdAt: number }>();
   const objects = new Map<string, { name: string; size: number }>();
   const awarded: string[] = [];
+  const claimed = new Set<string>();
   let partDone = false;
   const failed = { done: false };
   const exercise: SpeakingExercise | null =
@@ -57,7 +58,17 @@ function setup(over: { limited?: boolean; failPartOnce?: boolean; exercise?: Par
     hasOtherCompletedSince: async (sid, ex) => [...subs.values()].some((s) => s.studentId === sid && s.id !== ex && s.storagePath),
     getExerciseInfo: async () => ({ partId: PART, courseId: COURSE }),
     markNotified: async (id) => {
+      if (over.failMarkNotified) throw new Error("db down");
       subs.get(id)!.notifiedAt = "now";
+    },
+    claimNotification: async (id, sid) => {
+      const s = subs.get(id);
+      if (!s || s.studentId !== sid || s.notifiedAt || claimed.has(id) || !s.storagePath) return false;
+      claimed.add(id);
+      return true;
+    },
+    releaseNotification: async (id) => {
+      claimed.delete(id);
     },
     getPartExercises: async () => {
       if (over.failPartOnce && !failed.done) {
@@ -235,6 +246,28 @@ describe("audio-complete", () => {
     const r = await done({ ...t.deps, notify: async () => Promise.reject(new Error("tg down")) }, { submissionId: NEWID });
     expect(r.status).toBe(200);
     expect(t.subs.get(NEWID)?.notifiedAt).toBeNull();
+    // the lease was given back: the retry notifies
+    await done(t.deps, { submissionId: NEWID });
+    expect(t.calls.notify).toEqual([NEWID]);
+    expect(t.subs.get(NEWID)?.notifiedAt).toBe("now");
+  });
+
+  it("two simultaneous completes notify and bump exactly once (lease)", async () => {
+    t.objects.set(`${S}/${NEWID}`, { name: `${S}/${NEWID}.webm`, size: 5000 });
+    const results = await Promise.all([done(t.deps, { submissionId: NEWID }), done(t.deps, { submissionId: NEWID })]);
+    expect(results.map((r) => r.status)).toEqual([200, 200]);
+    expect(t.calls.notify).toEqual([NEWID]);
+    expect(t.calls.bump).toBe(1);
+  });
+
+  it("notify ok but markNotified failing: the lease is kept so a retry does not re-send", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const f = setup({ failMarkNotified: true });
+    await up(f.deps, { exerciseId: EX, mime: "audio/webm" });
+    f.objects.set(`${S}/${NEWID}`, { name: `${S}/${NEWID}.webm`, size: 5000 });
+    expect((await done(f.deps, { submissionId: NEWID })).status).toBe(200);
+    expect((await done(f.deps, { submissionId: NEWID })).status).toBe(200);
+    expect(f.calls.notify).toEqual([NEWID]);
   });
 });
 

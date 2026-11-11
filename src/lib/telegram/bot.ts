@@ -6,10 +6,33 @@ import { createServiceClient } from "@/lib/supabase/service";
 import type { Db } from "@/lib/telegram/api";
 import { registerEnrollment } from "@/lib/telegram/handlers/enrollment";
 import { MSG, registerLogin } from "@/lib/telegram/handlers/login";
+import { registerVideo, type VideoWiring } from "@/lib/telegram/handlers/video";
 import { logBotError } from "@/lib/telegram/log";
+import { bumpDailyTask } from "@/server/daily-tasks";
+import { notifyCuratorsOfSubmission } from "@/server/notify-curators";
+import { createSupabaseVideoStore } from "@/server/video-store";
 
-/** Builds a bot with all handlers; `getDb` and `botInfo` are injectable for tests. */
-export function createBot(token: string, getDb: () => Db = createServiceClient, botInfo?: UserFromGetMe) {
+function defaultVideoWiring(getDb: () => Db): VideoWiring {
+  return {
+    deps: () => {
+      const db = getDb();
+      return {
+        store: createSupabaseVideoStore(db),
+        bumpSpeaking: (studentId) => bumpDailyTask(db, studentId, "speaking"),
+        notify: notifyCuratorsOfSubmission,
+      };
+    },
+    archiveChatId: () => serverEnv().TELEGRAM_ARCHIVE_CHAT_ID,
+  };
+}
+
+/** Builds a bot with all handlers; `getDb`, `botInfo` and the video wiring are injectable for tests. */
+export function createBot(
+  token: string,
+  getDb: () => Db = createServiceClient,
+  botInfo?: UserFromGetMe,
+  video: VideoWiring = defaultVideoWiring(getDb),
+) {
   const bot = new Bot(token, botInfo ? { botInfo } : undefined);
   // Errors never escape: a non-2xx would make Telegram retry the same update forever.
   bot.use(async (ctx, next) => {
@@ -26,6 +49,7 @@ export function createBot(token: string, getDb: () => Db = createServiceClient, 
     }
   });
   registerLogin(bot, getDb);
+  registerVideo(bot, video);
   registerEnrollment(bot, getDb);
   return bot;
 }

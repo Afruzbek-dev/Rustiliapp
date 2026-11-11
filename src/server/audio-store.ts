@@ -5,6 +5,25 @@ import { createSupabaseAttemptStore } from "./attempts-store";
 
 export const SUBMISSIONS_BUCKET = "submissions";
 
+/** SERVICE read: the student's active, unexpired enrollment in the course (null when none). */
+export async function findActiveEnrollment(
+  service: SupabaseClient,
+  studentId: string,
+  courseId: string,
+): Promise<{ curatorGroupId: string | null } | null> {
+  const { data, error } = await service
+    .from("enrollments")
+    .select("curator_group_id, cohorts!inner(course_id)")
+    .eq("student_id", studentId)
+    .eq("status", "active")
+    .eq("cohorts.course_id", courseId)
+    .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
+    .limit(1);
+  if (error) throw new Error(`getActiveEnrollment: ${error.message}`);
+  const row = (data ?? [])[0] as { curator_group_id: string | null } | undefined;
+  return row ? { curatorGroupId: row.curator_group_id } : null;
+}
+
 /** `user` is the user-scoped client (RLS); `service` does storage and the writes API roles cannot do. */
 export function createSupabaseAudioStore(user: SupabaseClient, service: SupabaseClient): AudioStore {
   const progress = createSupabaseAttemptStore(user, service);
@@ -41,19 +60,7 @@ export function createSupabaseAudioStore(user: SupabaseClient, service: Supabase
       };
     },
 
-    async getActiveEnrollment(studentId, courseId) {
-      const { data, error } = await service
-        .from("enrollments")
-        .select("curator_group_id, cohorts!inner(course_id)")
-        .eq("student_id", studentId)
-        .eq("status", "active")
-        .eq("cohorts.course_id", courseId)
-        .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
-        .limit(1);
-      fail("getActiveEnrollment", error);
-      const row = (data ?? [])[0] as { curator_group_id: string | null } | undefined;
-      return row ? { curatorGroupId: row.curator_group_id } : null;
-    },
+    getActiveEnrollment: (studentId, courseId) => findActiveEnrollment(service, studentId, courseId),
 
     async createAudioSubmission(row) {
       const { data, error } = await service.rpc("create_audio_submission", {
@@ -142,6 +149,17 @@ export function createSupabaseAudioStore(user: SupabaseClient, service: Supabase
       const blocks = data.blocks as { lesson_part_id: string } | { lesson_part_id: string }[] | null | undefined;
       const block = Array.isArray(blocks) ? blocks[0] : blocks;
       return { partId: block?.lesson_part_id ?? null, courseId: data.course_id as string };
+    },
+
+    async claimNotification(submissionId, studentId) {
+      const { data, error } = await service.rpc("claim_submission_notification", { p_id: submissionId, p_student: studentId });
+      fail("claimNotification", error);
+      return data === true;
+    },
+
+    async releaseNotification(submissionId) {
+      const { error } = await service.rpc("release_submission_notification", { p_id: submissionId });
+      fail("releaseNotification", error);
     },
 
     async markNotified(submissionId) {

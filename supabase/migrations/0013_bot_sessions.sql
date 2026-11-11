@@ -94,29 +94,29 @@ alter table public.submissions add column notify_claimed_at timestamptz;
 -- for good. Only COMPLETED submissions can be claimed: audio needs storage_path, video needs
 -- tg_file_id (audio rows with storage_path NULL are unfinished uploads).
 -- ---------------------------------------------------------------------------
-create function public.claim_submission_notification(p_id uuid, p_student uuid) returns boolean
+-- claim returns the lease TOKEN (the new notify_claimed_at) for the single winner, null otherwise;
+-- release only gives back the lease that carries THAT token, so a stale holder cannot erase a newer
+-- holder's lease.
+create function public.claim_submission_notification(p_id uuid, p_student uuid) returns timestamptz
 language sql volatile security definer set search_path = public as $$
-  with c as (
-    update public.submissions s set notify_claimed_at = now()
-    where s.id = p_id and s.student_id = p_student and s.notified_at is null
-      and (s.notify_claimed_at is null or s.notify_claimed_at < now() - interval '2 minutes')
-      and ((s.kind = 'audio' and s.storage_path is not null)
-        or (s.kind = 'video' and s.tg_file_id is not null)
-        or s.kind = 'text')
-    returning 1
-  )
-  select exists (select 1 from c)
+  update public.submissions s set notify_claimed_at = clock_timestamp()
+  where s.id = p_id and s.student_id = p_student and s.notified_at is null
+    and (s.notify_claimed_at is null or s.notify_claimed_at < now() - interval '2 minutes')
+    and ((s.kind = 'audio' and s.storage_path is not null)
+      or (s.kind = 'video' and s.tg_file_id is not null)
+      or s.kind = 'text')
+  returning s.notify_claimed_at
 $$;
 
--- Gives the lease back after a failure so a retry can proceed at once.
-create function public.release_submission_notification(p_id uuid) returns void
+create function public.release_submission_notification(p_id uuid, p_token timestamptz) returns void
 language sql volatile security definer set search_path = public as $$
-  update public.submissions set notify_claimed_at = null where id = p_id and notified_at is null
+  update public.submissions set notify_claimed_at = null
+  where id = p_id and notified_at is null and notify_claimed_at = p_token
 $$;
 
-revoke execute on function public.claim_submission_notification(uuid, uuid), public.release_submission_notification(uuid)
+revoke execute on function public.claim_submission_notification(uuid, uuid), public.release_submission_notification(uuid, timestamptz)
   from public, anon, authenticated;
-grant execute on function public.claim_submission_notification(uuid, uuid), public.release_submission_notification(uuid)
+grant execute on function public.claim_submission_notification(uuid, uuid), public.release_submission_notification(uuid, timestamptz)
   to service_role;
 
 revoke truncate, trigger, references on all tables in schema public from anon, authenticated;

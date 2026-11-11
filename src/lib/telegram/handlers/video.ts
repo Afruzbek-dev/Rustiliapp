@@ -17,6 +17,8 @@ export const VIDEO_MSG = {
   already: "Bu video allaqachon qabul qilingan",
   rateLimited: "Juda ko'p urinish. 10 daqiqadan keyin qayta urinib ko'ring",
   duplicateOther: "Bu video allaqachon yuborilgan. Yangi video yozing",
+  duplicateElsewhere: "Bu video boshqa topshiriq uchun yuborilgan",
+  inProgress: "Qabul qilinmoqda, bir daqiqa kuting",
   notifyFailed: "Video saqlandi, lekin kuratorga yuborilmadi. Birozdan keyin shu videoni qayta yuboring",
 } as const;
 
@@ -30,6 +32,8 @@ const REPLY: Record<VideoOutcome, string> = {
   not_available: VIDEO_MSG.notAvailable,
   rate_limited: VIDEO_MSG.rateLimited,
   duplicate_other: VIDEO_MSG.duplicateOther,
+  duplicate_elsewhere: VIDEO_MSG.duplicateElsewhere,
+  in_progress: VIDEO_MSG.inProgress,
 };
 
 export interface VideoWiring {
@@ -67,6 +71,7 @@ export function registerVideo(bot: Bot, wiring: VideoWiring) {
       fileUniqueId: media.file_unique_id,
       size: media.file_size,
       copyToArchive: async () => (await ctx.api.copyMessage(wiring.archiveChatId(), chatId, messageId)).message_id,
+      deleteArchiveCopy: async (id) => void (await ctx.api.deleteMessage(wiring.archiveChatId(), id)),
     });
     await ctx.reply(REPLY[outcome]);
   });

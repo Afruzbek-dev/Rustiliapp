@@ -75,18 +75,55 @@ export function createSupabaseVideoStore(service: SupabaseClient): VideoStore {
       fail("deleteSession", error);
     },
 
-    async findVideoByUnique(studentId, fileUniqueId) {
+    async deleteExpiredSessions(beforeIso, telegramId) {
+      let q = service.from("bot_sessions").delete().lt("expires_at", beforeIso);
+      if (telegramId !== undefined) q = q.eq("telegram_id", telegramId);
+      const { error } = await q;
+      fail("deleteExpiredSessions", error);
+    },
+
+    async findVideoByUnique(fileUniqueId) {
       const { data, error } = await service
         .from("submissions")
-        .select("id, exercise_id, notified_at")
-        .eq("student_id", studentId)
+        .select("id, student_id, exercise_id, notified_at")
         .eq("kind", "video")
         .eq("tg_file_unique_id", fileUniqueId)
         .maybeSingle();
       fail("findVideoByUnique", error);
       return data
-        ? { id: data.id as string, exerciseId: data.exercise_id as string, notifiedAt: (data.notified_at as string | null) ?? null }
+        ? {
+            id: data.id as string,
+            studentId: data.student_id as string,
+            exerciseId: data.exercise_id as string,
+            notifiedAt: (data.notified_at as string | null) ?? null,
+          }
         : null;
+    },
+
+    async countRecentVideos(studentId, exerciseId, sinceIso) {
+      const { count, error } = await service
+        .from("submissions")
+        .select("id", { count: "exact", head: true })
+        .eq("student_id", studentId)
+        .eq("exercise_id", exerciseId)
+        .eq("kind", "video")
+        .gt("created_at", sinceIso);
+      fail("countRecentVideos", error);
+      return count ?? 0;
+    },
+
+    async listStaleVideos(olderThanIso, limit) {
+      const { data, error } = await service
+        .from("submissions")
+        .select("id, student_id, exercise_id")
+        .eq("kind", "video")
+        .not("tg_file_id", "is", null)
+        .is("notified_at", null)
+        .lt("created_at", olderThanIso)
+        .order("created_at", { ascending: true })
+        .limit(limit);
+      fail("listStaleVideos", error);
+      return (data ?? []).map((r) => ({ id: r.id as string, studentId: r.student_id as string, exerciseId: r.exercise_id as string }));
     },
 
     async createVideoSubmission(row): Promise<CreateVideoResult> {
@@ -122,11 +159,11 @@ export function createSupabaseVideoStore(service: SupabaseClient): VideoStore {
     async claimNotification(submissionId, studentId) {
       const { data, error } = await service.rpc("claim_submission_notification", { p_id: submissionId, p_student: studentId });
       fail("claimNotification", error);
-      return data === true;
+      return typeof data === "string" ? data : null;
     },
 
-    async releaseNotification(submissionId) {
-      const { error } = await service.rpc("release_submission_notification", { p_id: submissionId });
+    async releaseNotification(submissionId, token) {
+      const { error } = await service.rpc("release_submission_notification", { p_id: submissionId, p_token: token });
       fail("releaseNotification", error);
     },
 

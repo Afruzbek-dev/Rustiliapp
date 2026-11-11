@@ -65,7 +65,8 @@ describe("media proxy", () => {
     expect(r.status).toBe(200);
     expect(await r.text()).toBe("VIDEO-BYTES");
     expect(r.headers.get("content-type")).toBe("video/mp4");
-    expect(r.headers.get("cache-control")).toBe("private, max-age=300");
+    expect(r.headers.get("cache-control")).toBe("private, no-cache");
+    expect(r.headers.get("vary")).toBe("Cookie");
     expect(r.headers.get("x-content-type-options")).toBe("nosniff");
     expect(r.headers.get("content-length")).toBe("11");
     expect(calls.fetch).toEqual([{ path: "videos/file_1.mp4", range: null }]);
@@ -79,8 +80,32 @@ describe("media proxy", () => {
     expect(r.headers.get("content-range")).toBe("bytes 0-3/11");
     expect(s.calls.fetch[0]!.range).toBe("bytes=0-3");
     const bad = setup();
-    await get(bad.deps, { range: "bytes=0-1,5-9; evil" });
-    expect(bad.calls.fetch[0]!.range).toBeNull();
+    const refused = await get(bad.deps, { range: "bytes=0-1,5-9; evil" });
+    expect(refused.status).toBe(416);
+    expect(bad.calls.fetch).toEqual([]); // an invalid Range never reaches Telegram
+  });
+
+  it("upstream non-200: 416 passes through, other statuses (403/404/500) become a generic 502", async () => {
+    expect((await get(setup({ upstream: new Response("x", { status: 416 }) }).deps, { range: "bytes=999-" })).status).toBe(416);
+    for (const status of [403, 404, 500]) {
+      const r = await get(setup({ upstream: new Response("secret upstream body", { status }) }).deps);
+      expect(r.status).toBe(502);
+      expect(await r.text()).toBe("bad_gateway");
+    }
+  });
+
+  it("caps the streamed body at 20 MB even when no length is declared", async () => {
+    const chunk = new Uint8Array(8 * 1024 * 1024);
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (sent++ < 4) c.enqueue(chunk);
+        else c.close();
+      },
+    });
+    const r = await get(setup({ upstream: new Response(body, { status: 200, headers: { "content-type": "video/mp4" } }) }).deps);
+    expect(r.status).toBe(200);
+    await expect(r.arrayBuffer()).rejects.toThrow();
   });
 
   it("never serves a non-video content type from upstream", async () => {
@@ -122,6 +147,19 @@ describe("telegram file client", () => {
     expect(calls[1]!.url).toBe(`https://api.telegram.org/file/bot${TOKEN}/videos/a.mp4`);
     expect((calls[1]!.init!.headers as Record<string, string>).Range).toBe("bytes=0-9");
     expect(calls.every((c) => c.init?.redirect === "error")).toBe(true);
+  });
+
+  it("aborts a hanging upstream after ~15 s", async () => {
+    vi.useFakeTimers();
+    try {
+      const hang = vi.fn((_u: unknown, init?: RequestInit) => new Promise<Response>((_res, rej) => init?.signal?.addEventListener("abort", () => rej(new Error("aborted"))))) as unknown as typeof fetch;
+      const files = createTelegramFiles(TOKEN, hang);
+      const p = files.getFile("x").catch((e: Error) => e);
+      await vi.advanceTimersByTimeAsync(15_001);
+      expect(String(await p)).toContain("network");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("errors never carry the token or URL", async () => {

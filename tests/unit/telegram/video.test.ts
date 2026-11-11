@@ -4,6 +4,7 @@ import type { UserFromGetMe } from "grammy/types";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createBot } from "@/lib/telegram/bot";
 import { VIDEO_MSG } from "@/lib/telegram/handlers/video";
+import { completeStaleVideoSubmissions } from "@/server/video-submissions";
 import type { CreateVideoResult, VideoExercise, VideoStore } from "@/server/video-submissions";
 import { createFakeDb } from "./fake-db";
 
@@ -27,12 +28,12 @@ const fixture = (name: string): Json => JSON.parse(readFileSync(join(process.cwd
 function setup(over: { exercise?: Partial<VideoExercise> | null; testItem?: boolean; enrolled?: boolean; noProfile?: boolean; failNotify?: boolean; now?: Date } = {}) {
   const sessions = new Map<number, { exerciseId: string; expiresAt: Date }>();
   const subs: { id: string; studentId: string; exerciseId: string; group: string | null; fileUniqueId: string; archive: number; notifiedAt: string | null; claimed: boolean; createdAt: number }[] = [];
-  const calls = { notify: [] as string[], bump: 0, partXp: [] as string[] };
+  const calls = { notify: [] as string[], bump: 0, partXp: [] as string[], cleanup: [] as (number | "all")[] };
   let partDone = false;
   const exercise: VideoExercise | null =
     over.exercise === null ? null : { id: EX, type: "speaking", checkMode: "review", courseId: COURSE, partId: PART, ...over.exercise };
   let clock = over.now ?? new Date("2026-11-10T07:00:00Z");
-  const world = { enrolled: over.enrolled !== false };
+  const world = { enrolled: over.enrolled !== false, race: null as null | "rate_limited" | "duplicate_other", random: 0.5 };
 
   const store: VideoStore = {
     getProfileByTelegramId: async (tid) => (over.noProfile || tid !== 777 ? null : { id: STUDENT }),
@@ -45,11 +46,19 @@ function setup(over: { exercise?: Partial<VideoExercise> | null; testItem?: bool
       return s && s.expiresAt > now ? { exerciseId: s.exerciseId } : null;
     },
     deleteSession: async (tid) => void sessions.delete(tid),
-    findVideoByUnique: async (sid, u) => {
-      const s = subs.find((x) => x.studentId === sid && x.fileUniqueId === u);
-      return s ? { id: s.id, exerciseId: s.exerciseId, notifiedAt: s.notifiedAt } : null;
+    deleteExpiredSessions: async (before, tid) => {
+      calls.cleanup.push(tid ?? "all");
+      for (const [k, v] of sessions) if (v.expiresAt < new Date(before) && (tid === undefined || k === tid)) sessions.delete(k);
     },
+    findVideoByUnique: async (u) => {
+      const s = subs.find((x) => x.fileUniqueId === u);
+      return s ? { id: s.id, studentId: s.studentId, exerciseId: s.exerciseId, notifiedAt: s.notifiedAt } : null;
+    },
+    countRecentVideos: async (sid, ex, since) => subs.filter((x) => x.studentId === sid && x.exerciseId === ex && x.createdAt > Date.parse(since)).length,
+    listStaleVideos: async (olderThan) =>
+      subs.filter((s) => !s.notifiedAt && s.createdAt < Date.parse(olderThan)).map((s) => ({ id: s.id, studentId: s.studentId, exerciseId: s.exerciseId })),
     createVideoSubmission: async (r): Promise<CreateVideoResult> => {
+      if (world.race) return { outcome: world.race };
       const dup = subs.find((x) => x.fileUniqueId === r.fileUniqueId);
       if (dup) return dup.studentId === r.studentId && dup.exerciseId === r.exerciseId ? { outcome: "duplicate", submissionId: dup.id } : { outcome: "duplicate_other" };
       if (subs.filter((x) => x.studentId === r.studentId && x.exerciseId === r.exerciseId && x.createdAt > clock.getTime() - 600_000).length >= 3) return { outcome: "rate_limited" };
@@ -60,9 +69,9 @@ function setup(over: { exercise?: Partial<VideoExercise> | null; testItem?: bool
     hasOtherCompletedSince: async (sid, ex) => subs.some((s) => s.studentId === sid && s.id !== ex),
     claimNotification: async (id) => {
       const s = subs.find((x) => x.id === id)!;
-      if (s.notifiedAt || s.claimed) return false;
+      if (s.notifiedAt || s.claimed) return null;
       s.claimed = true;
-      return true;
+      return "tok";
     },
     releaseNotification: async (id) => void (subs.find((x) => x.id === id)!.claimed = false),
     markNotified: async (id) => void (subs.find((x) => x.id === id)!.notifiedAt = "now"),
@@ -92,6 +101,7 @@ function setup(over: { exercise?: Partial<VideoExercise> | null; testItem?: bool
         calls.notify.push(id);
       },
       now: () => clock,
+      random: () => world.random,
     }),
     archiveChatId: () => ARCHIVE,
   };
@@ -103,7 +113,7 @@ function setup(over: { exercise?: Partial<VideoExercise> | null; testItem?: bool
     if (method === "copyMessage") return Promise.resolve({ ok: true, result: { message_id: nextArchiveId++ } } as never);
     return Promise.resolve({ ok: true, result: true } as never);
   });
-  return { bot, sent, subs, sessions, calls, world, setClock: (d: Date) => (clock = d) };
+  return { bot, sent, subs, sessions, calls, world, deps: wiring.deps, setClock: (d: Date) => (clock = d) };
 }
 
 const of = (sent: Sent[], m: string) => sent.filter((s) => s.method === m);
@@ -289,6 +299,93 @@ describe("telegram video flow", () => {
       }
       expect(t.subs).toHaveLength(3);
       expect(texts(t.sent).at(-1)).toBe(VIDEO_MSG.rateLimited);
+      // the pre-check refuses BEFORE the copy: the archive chat is not flooded
+      expect(of(t.sent, "copyMessage")).toHaveLength(3);
+      expect(of(t.sent, "deleteMessage")).toHaveLength(0);
+    });
+
+    it("a duplicate file (own, already processed) is not copied again", async () => {
+      const t = setup();
+      await send(t, fixture("start-task"));
+      await send(t, note());
+      await send(t, fixture("start-task"));
+      await send(t, note({}, 777));
+      expect(of(t.sent, "copyMessage")).toHaveLength(1);
+      expect(texts(t.sent).at(-1)).toBe(VIDEO_MSG.already);
+    });
+
+    it("the same file for ANOTHER exercise says so without revealing anything else", async () => {
+      const t = setup();
+      await send(t, fixture("start-task"));
+      await send(t, note());
+      t.sessions.set(777, { exerciseId: "99999999-9999-4999-8999-999999999999", expiresAt: new Date("2026-11-10T08:00:00Z") });
+      await send(t, note({}, 778));
+      expect(texts(t.sent).at(-1)).toBe(VIDEO_MSG.duplicateElsewhere);
+      expect(of(t.sent, "copyMessage")).toHaveLength(1);
+    });
+
+    it("a copy that turns out to be unused (race lost inside the lock) is deleted from the archive chat", async () => {
+      for (const race of ["rate_limited", "duplicate_other"] as const) {
+        const t = setup();
+        await send(t, fixture("start-task"));
+        t.world.race = race;
+        await send(t, note());
+        expect(of(t.sent, "copyMessage")).toHaveLength(1);
+        const del = of(t.sent, "deleteMessage");
+        expect(del).toHaveLength(1);
+        expect(del[0]!.payload).toMatchObject({ chat_id: ARCHIVE, message_id: 900 });
+        expect(texts(t.sent).at(-1)).toBe(race === "rate_limited" ? VIDEO_MSG.rateLimited : VIDEO_MSG.duplicateOther);
+        expect(t.subs).toHaveLength(0);
+      }
+    });
+
+    it("a stored but unfinished video: re-sending the SAME file completes it even without a live session", async () => {
+      const t = setup();
+      t.subs.push({ id: "00000000-0000-4000-8000-0000000000aa", studentId: STUDENT, exerciseId: EX, group: GROUP, fileUniqueId: "UNIQ-1", archive: 5, notifiedAt: null, claimed: false, createdAt: 0 });
+      await send(t, note()); // no /start, no session
+      expect(texts(t.sent).at(-1)).toBe(VIDEO_MSG.accepted);
+      expect(t.subs).toHaveLength(1);
+      expect(t.subs[0]!.notifiedAt).toBe("now");
+      expect(t.calls.notify).toEqual(["00000000-0000-4000-8000-0000000000aa"]);
+      expect(of(t.sent, "copyMessage")).toHaveLength(0);
+    });
+
+    it("while another worker still holds the lease the student is told it is in progress, not 'already'", async () => {
+      const t = setup();
+      t.subs.push({ id: "00000000-0000-4000-8000-0000000000aa", studentId: STUDENT, exerciseId: EX, group: GROUP, fileUniqueId: "UNIQ-1", archive: 5, notifiedAt: null, claimed: true, createdAt: 0 });
+      await send(t, note());
+      expect(texts(t.sent).at(-1)).toBe(VIDEO_MSG.inProgress);
+      expect(t.calls.notify).toEqual([]);
+    });
+
+    it("/start task_ from a group chat is ignored", async () => {
+      const t = setup();
+      const u = fixture("start-task");
+      u.message.chat = { id: -5, type: "supergroup", title: "G" };
+      await send(t, u);
+      expect(t.sessions.size).toBe(0);
+      expect(t.sent).toHaveLength(0);
+    });
+
+    it("/start cleans this user's long-expired session and sweeps globally 1 time in 50", async () => {
+      const t = setup();
+      t.sessions.set(5, { exerciseId: EX, expiresAt: new Date("2026-11-01T00:00:00Z") });
+      await send(t, fixture("start-task"));
+      expect(t.calls.cleanup).toEqual([777]);
+      expect(t.sessions.has(5)).toBe(true);
+      t.world.random = 0.01;
+      await send(t, fixture("start-task"));
+      expect(t.calls.cleanup).toEqual([777, 777, "all"]);
+      expect(t.sessions.has(5)).toBe(false);
+    });
+
+    it("the sweeper completes stored, un-notified videos older than 2 minutes (and only once)", async () => {
+      const t = setup();
+      t.subs.push({ id: "00000000-0000-4000-8000-0000000000aa", studentId: STUDENT, exerciseId: EX, group: GROUP, fileUniqueId: "S1", archive: 5, notifiedAt: null, claimed: false, createdAt: Date.parse("2026-11-10T06:00:00Z") });
+      t.subs.push({ id: "00000000-0000-4000-8000-0000000000bb", studentId: STUDENT, exerciseId: EX, group: GROUP, fileUniqueId: "S2", archive: 6, notifiedAt: null, claimed: false, createdAt: Date.parse("2026-11-10T06:59:30Z") });
+      expect(await completeStaleVideoSubmissions(t.deps())).toBe(1);
+      expect(t.calls.notify).toEqual(["00000000-0000-4000-8000-0000000000aa"]);
+      expect(await completeStaleVideoSubmissions(t.deps())).toBe(0);
     });
 
     it("a file already stored for another student is refused without leaking or completing anything", async () => {

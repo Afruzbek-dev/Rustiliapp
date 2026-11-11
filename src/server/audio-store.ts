@@ -154,11 +154,11 @@ export function createSupabaseAudioStore(user: SupabaseClient, service: Supabase
     async claimNotification(submissionId, studentId) {
       const { data, error } = await service.rpc("claim_submission_notification", { p_id: submissionId, p_student: studentId });
       fail("claimNotification", error);
-      return data === true;
+      return typeof data === "string" ? data : null;
     },
 
-    async releaseNotification(submissionId) {
-      const { error } = await service.rpc("release_submission_notification", { p_id: submissionId });
+    async releaseNotification(submissionId, token) {
+      const { error } = await service.rpc("release_submission_notification", { p_id: submissionId, p_token: token });
       fail("releaseNotification", error);
     },
 

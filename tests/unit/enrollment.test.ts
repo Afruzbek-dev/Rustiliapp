@@ -131,6 +131,64 @@ describe("ensurePendingEnrollment", () => {
   });
 });
 
+describe("closed cohorts", () => {
+  const closed = (over: Row = {}) => [cohort("c1", { access_until: "2026-11-01T00:00:00Z", ...over })];
+
+  it("approve into a closed cohort changes nothing and reports cohort_closed", async () => {
+    for (const status of ["pending", "expired", "rejected"]) {
+      const w = world({ cohorts: closed(), enrollments: [enr("e1", { status, expires_at: "2026-10-01T00:00:00Z" })] });
+      const before = JSON.stringify(w.tables.enrollments);
+      const res = await approveEnrollment(w.db, "e1", "teacher", {}, NOW);
+      expect(res.outcome).toBe("cohort_closed");
+      expect(JSON.stringify(w.tables.enrollments)).toBe(before);
+    }
+  });
+
+  it("also treats ends_on + 1 month in the past as closed, but still authorizes first", async () => {
+    const w = world({ cohorts: [cohort("c1", { ends_on: "2026-09-01" })], enrollments: [enr("e1")] });
+    await expect(approveEnrollment(w.db, "e1", "teacher2", {}, NOW)).rejects.toMatchObject({ code: "forbidden" });
+    expect((await approveEnrollment(w.db, "e1", "admin", {}, NOW)).outcome).toBe("cohort_closed");
+  });
+
+  it("ensurePendingEnrollment skips closed cohorts", async () => {
+    const w = world({ cohorts: closed() });
+    expect(await ensurePendingEnrollment(w.db, "s1", NOW)).toEqual({ created: false, reason: "no_cohort" });
+  });
+
+  it("rolls the pending row back when the cohort closes between the read and the insert", async () => {
+    const w = world();
+    const realFrom = (w.db as unknown as { from: (t: string) => Record<string, unknown> }).from;
+    (w.db as unknown as { from: unknown }).from = (t: string) => {
+      const b = realFrom(t);
+      if (t === "enrollments") {
+        const insert = b.insert as (p: Row) => unknown;
+        b.insert = (p: Row) => {
+          w.tables.cohorts![0]!.access_until = "2026-11-10T09:00:00Z"; // closes right after the check
+          return insert(p);
+        };
+      }
+      return b;
+    };
+    expect(await ensurePendingEnrollment(w.db, "s1", NOW)).toEqual({ created: false, reason: "no_cohort" });
+    expect(w.tables.enrollments).toHaveLength(0);
+  });
+
+  it("already_approved reports the original approver", async () => {
+    const w = world({
+      profiles: [
+        { id: "teacher", role: "teacher", full_name: "Zarina" },
+        { id: "admin", role: "admin", full_name: "Admin" },
+        { id: "s1", role: "student", full_name: "Ali", telegram_id: 777 },
+      ],
+      enrollments: [enr("e1", { status: "active", approved_by: "teacher", expires_at: "2027-01-01T00:00:00Z" })],
+    });
+    expect(await approveEnrollment(w.db, "e1", "admin", {}, NOW)).toMatchObject({
+      outcome: "already_approved",
+      approvedByName: "Zarina",
+    });
+  });
+});
+
 describe("computeExpiresAt", () => {
   it("uses access_until, else ends_on + 1 month, else now + 90 days; never null", () => {
     expect(computeExpiresAt({ access_until: "2027-03-01T00:00:00Z", ends_on: "2027-01-10" }, NOW)).toBe("2027-03-01T00:00:00.000Z");

@@ -52,6 +52,7 @@ const profiles = (): Row[] => [
   { id: "teacher", role: "teacher", full_name: "Zarina", telegram_id: 1 },
   { id: "teacher2", role: "teacher", full_name: "Boshqa", telegram_id: 2 },
   { id: "student", role: "student", full_name: "Ali Valiyev", telegram_id: 777 },
+  { id: "admin", role: "admin", full_name: "Admin Adminov", telegram_id: 3 },
   { id: "plain", role: "student", full_name: "Vali", telegram_id: 888 },
 ];
 const pending = (): Row => ({
@@ -164,7 +165,7 @@ describe("staff enrollment callbacks", () => {
     expect(of(sent, "sendMessage")).toHaveLength(0);
     expect(of(sent, "editMessageText").map((e) => e.payload.text)).toEqual([
       "Rad etildi: Ali Valiyev (Zarina)",
-      "Rad etildi: Ali Valiyev (Zarina)",
+      "Rad etildi: Ali Valiyev",
     ]);
   });
 
@@ -190,6 +191,66 @@ describe("staff enrollment callbacks", () => {
     const { bot, sent } = setup({ profiles: profiles() });
     await bot.handleUpdate(press(1, `enr:approve:${ENR_ID}`) as never);
     expect(of(sent, "answerCallbackQuery")[0]!.payload).toMatchObject({ text: ENR_MSG.notFound });
+  });
+
+  it("approving into a closed cohort edits the message, changes nothing and sends no DM", async () => {
+    const { bot, sent, fake } = setup({
+      profiles: profiles(),
+      enrollments: [pending()],
+      cohorts: [{ id: "c1", course_id: "course", starts_on: null, ends_on: null, access_until: "2026-01-01T00:00:00Z", created_at: "2025-01-01T00:00:00Z" }],
+    });
+    await bot.handleUpdate(press(1, `enr:approve:${ENR_ID}`) as never);
+    expect(fake.tables.enrollments![0]!.status).toBe("pending");
+    expect(of(sent, "sendMessage")).toHaveLength(0);
+    expect(of(sent, "editMessageText")[0]!.payload.text).toBe(
+      "Guruh yopilgan: Ali Valiyev uchun ruxsat berilmadi (kirish muddati o'tgan)",
+    );
+  });
+
+  it("a repeat press by another staff member keeps the original approver's name", async () => {
+    const { bot, sent } = setup({ profiles: profiles(), enrollments: [pending()] });
+    await bot.handleUpdate(press(1, `enr:approve:${ENR_ID}`, 910) as never);
+    await bot.handleUpdate(press(3, `enr:approve:${ENR_ID}`, 911) as never);
+    const texts = of(sent, "editMessageText").map((e) => e.payload.text);
+    expect(texts[1]).toBe(texts[0]);
+    expect(texts[1]).toContain("(Zarina)");
+  });
+
+  it("reject on an expired enrollment says so", async () => {
+    const { bot, sent, fake } = setup({
+      profiles: profiles(),
+      enrollments: [{ ...pending(), status: "expired", expires_at: "2026-01-01T00:00:00Z" }],
+    });
+    await bot.handleUpdate(press(1, `enr:reject:${ENR_ID}`) as never);
+    expect(fake.tables.enrollments![0]!.status).toBe("expired");
+    expect(of(sent, "editMessageText")[0]!.payload.text).toBe("Muddati tugagan, rad etish mumkin emas: Ali Valiyev");
+  });
+
+  it("rejects uuid-shaped garbage that is not a real uuid", async () => {
+    const { bot, sent } = setup({ profiles: profiles(), enrollments: [pending()] });
+    await bot.handleUpdate(press(1, `enr:approve:${"-".repeat(36)}`) as never);
+    await bot.handleUpdate(press(1, `enr:approve:${"a".repeat(36)}`) as never);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("any thrown error still answers the callback with a generic message and logs op/code only", async () => {
+    const { bot, sent, fake } = setup({ profiles: profiles(), enrollments: [pending()] });
+    const realFrom = (fake.db as unknown as { from: (t: string) => Record<string, unknown> }).from;
+    (fake.db as unknown as { from: unknown }).from = (t: string) => {
+      if (t === "enrollments") {
+        const b: Record<string, unknown> = {};
+        b.select = () => b;
+        b.eq = () => b;
+        b.maybeSingle = () => Promise.resolve({ data: null, error: { code: "22P02", message: "+998901234567" } });
+        return b;
+      }
+      return realFrom(t);
+    };
+    await bot.handleUpdate(press(1, `enr:approve:${ENR_ID}`, 920) as never);
+    expect(of(sent, "answerCallbackQuery")).toHaveLength(1);
+    expect(of(sent, "answerCallbackQuery")[0]!.payload).toMatchObject({ text: ENR_MSG.error, show_alert: true });
+    expect(console.error).toHaveBeenCalledWith("telegram bot error", { op: "loadEnrollment", code: "db:22P02", update_id: 920 });
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain("998");
   });
 
   it("keeps callback_data under 64 bytes", async () => {

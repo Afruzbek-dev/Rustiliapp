@@ -42,3 +42,10 @@ export async function requireStaff() {
   if (role !== "teacher" && role !== "admin") redirect("/home");
   return { user, role };
 }
+
+/** Anyone who may use the review queue: curator, teacher or admin. */
+export async function requireReviewer() {
+  const { user, role } = await currentUserAndRole();
+  if (role !== "curator" && role !== "teacher" && role !== "admin") redirect("/home");
+  return { user, role };
+}

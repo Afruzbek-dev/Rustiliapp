@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui";
 import { normalizeWord, splitToken } from "@/lib/blocks/normalize";
 import type { TextPayload } from "@/lib/blocks/types";
@@ -109,24 +109,11 @@ export function TextBlock({ payload, words, onDone, done = false }: TextBlockPro
                       }}
                       aria-expanded={isOpen}
                       onClick={() => setOpen(isOpen ? null : key)}
-                      className="min-h-6 rounded-sm border-b-2 border-dashed border-info-strong px-0.5 text-left text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-info-strong"
+                      className="relative min-h-6 rounded-sm after:absolute after:-inset-x-1 after:-inset-y-2 after:content-[''] border-b-2 border-dashed border-info-strong px-0.5 text-left text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-info-strong"
                     >
                       {core}
                     </button>
-                    {isOpen && (
-                      <span
-                        role="dialog"
-                        aria-label="Tarjima"
-                        className="absolute top-full left-0 z-10 mt-1 block w-max max-w-[min(16rem,75vw)] rounded-[var(--radius-sm)] border-2 border-border-strong bg-card p-3 text-left text-base shadow-[0_4px_0_var(--border-strong)]"
-                      >
-                        <span lang="ru" className="block font-extrabold text-ink">
-                          {word.stress ?? word.ru}
-                        </span>
-                        <span lang="uz" className="block text-ink-2">
-                          {word.uz}
-                        </span>
-                      </span>
-                    )}
+                    {isOpen && <WordPopover word={word} />}
                   </span>
                   {trail}
                 </span>
@@ -142,5 +129,31 @@ export function TextBlock({ payload, words, onDone, done = false }: TextBlockPro
         </Button>
       )}
     </article>
+  );
+}
+
+/** Translation bubble under the word; shifted left when it would overflow the viewport's right edge. */
+function WordPopover({ word }: { word: GlossaryWord }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const over = el.getBoundingClientRect().right - (window.innerWidth - 8);
+    if (over > 0) el.style.transform = `translateX(-${Math.ceil(over)}px)`;
+  }, []);
+  return (
+    <span
+      ref={ref}
+      role="dialog"
+      aria-label="Tarjima"
+      className="absolute top-full left-0 z-10 mt-1 block w-max max-w-[min(16rem,75vw)] rounded-[var(--radius-sm)] border-2 border-border-strong bg-card p-3 text-left text-base shadow-[0_4px_0_var(--border-strong)]"
+    >
+      <span lang="ru" className="block font-extrabold text-ink">
+        {word.stress ?? word.ru}
+      </span>
+      <span lang="uz" className="block text-ink-2">
+        {word.uz}
+      </span>
+    </span>
   );
 }

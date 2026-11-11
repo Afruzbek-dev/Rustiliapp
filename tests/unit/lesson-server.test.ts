@@ -23,6 +23,7 @@ function fakeDb(
     progress?: Record<string, PartProgress>;
     published?: string[];
     exercisesExtra?: Record<string, unknown>;
+    testItems?: string[];
   } = {},
 ): LessonDb & { calls: string[] } {
   const calls: string[] = [];
@@ -82,6 +83,9 @@ function fakeDb(
         { id: "zz", blockId: "other", type: "choose", prompt: null, payload: {}, checkMode: "auto" },
       ].map((e) => ({ ...e, ...(opts.exercisesExtra ?? {}) })) as never;
     },
+    async testItemIds(ids) {
+      return ids.filter((i) => (opts.testItems ?? []).includes(i));
+    },
     async words() {
       return [{ id: W1, ru: "мама", stress: "ма́ма", uz: "ona" }];
     },
@@ -117,6 +121,13 @@ describe("getLessonPartWith", () => {
     });
     const data = await getLessonPartWith(db, "s1", "p1");
     expect(data?.exercises[EX1]).toBeUndefined(); // EX1 belongs to b3, not b1
+  });
+
+  it("does not offer exercises that are test items (they always 404 on /api/attempts)", async () => {
+    const data = await getLessonPartWith(fakeDb({ testItems: [EX1] }), "s1", "p1");
+    expect(data?.exercises[EX1]).toBeUndefined();
+    expect(data?.exercises[EX2]).toBeDefined();
+    expect(data?.blocks.some((b) => b.id === "b3")).toBe(true); // block stays; the player shows it as skipped
   });
 
   it("returns null for a locked part, an unknown part and a part without published blocks", async () => {
@@ -204,6 +215,39 @@ describe("handleCompleteRequest", () => {
     expect(r.json).toEqual({ completed: true, newlyCompleted: true, xpAwarded: 20 });
   });
 
+  it("a part with zero required work completes (20 XP once, then 0)", async () => {
+    const none = fakeStore({ getPartExercises: async () => [] });
+    expect((await handleCompleteRequest({ store: none, canPlay }, { userId: "u", body })).json).toMatchObject({
+      completed: true,
+      xpAwarded: 20,
+    });
+    // only arrange / listen_pick (not checkable) exercises: nothing required either
+    let paid = false;
+    const once = fakeStore({
+      getPartExercises: async () => [
+        { id: "a1", type: "arrange", checkMode: "auto", key: null },
+        { id: "a2", type: "listen_pick", checkMode: "auto", key: null },
+      ],
+      markPartCompleted: async () => !paid,
+      awardXp: async () => (paid ? false : (paid = true)),
+    });
+    expect((await handleCompleteRequest({ store: once, canPlay }, { userId: "u", body })).json).toEqual({
+      completed: true,
+      newlyCompleted: true,
+      xpAwarded: 20,
+    });
+    expect((await handleCompleteRequest({ store: once, canPlay }, { userId: "u", body })).json).toEqual({
+      completed: true,
+      newlyCompleted: false,
+      xpAwarded: 0,
+    });
+  });
+
+  it("a locked part is a 404 even when it has no required work", async () => {
+    const store = fakeStore({ getPartExercises: async () => [] });
+    expect((await handleCompleteRequest({ store, canPlay: async () => false }, { userId: "u", body })).status).toBe(404);
+  });
+
   it("is idempotent: a second call grants no XP", async () => {
     const store = fakeStore({
       getCorrectRefs: async () => [
@@ -234,7 +278,8 @@ describe("handleAudioListened", () => {
   const audio = { id: blockId, type: "audio", payload: { path: "a.mp3", title: "A" } };
   const mk = (over: Partial<Parameters<typeof handleAudioListened>[0]> = {}) => ({
     getRole: async () => "student" as string | null,
-    getVisibleBlock: async () => audio as { id: string; type: string; payload: unknown } | null,
+    getVisibleBlock: async () => ({ ...audio, partId: "p1" }) as { id: string; type: string; payload: unknown; partId: string } | null,
+    canPlay: async () => true,
     bumpAudioOnce: vi.fn(async () => true),
     ...over,
   });
@@ -255,6 +300,9 @@ describe("handleAudioListened", () => {
     expect((await handleAudioListened(video, { userId: "u", body: { blockId } })).status).toBe(404);
     const hidden = mk({ getVisibleBlock: async () => null });
     expect((await handleAudioListened(hidden, { userId: "u", body: { blockId } })).status).toBe(404);
+    const locked = mk({ canPlay: async () => false });
+    expect((await handleAudioListened(locked, { userId: "u", body: { blockId } })).status).toBe(404);
+    expect(locked.bumpAudioOnce).not.toHaveBeenCalled();
     expect(deps.bumpAudioOnce).not.toHaveBeenCalled();
     expect(video.bumpAudioOnce).not.toHaveBeenCalled();
     expect(hidden.bumpAudioOnce).not.toHaveBeenCalled();

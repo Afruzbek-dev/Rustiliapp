@@ -5,7 +5,7 @@ import { bumpDailyTaskOnce } from "@/server/daily-tasks";
 import { createGrammarTaskHook } from "@/server/grammar-task";
 import { submitAttempt, type AttemptStore } from "@/server/attempts";
 
-type Block = { id: string; type: string; payload: unknown; published: boolean } | null;
+type Block = { id: string; type: string; payload: unknown; published: boolean; lesson_part_id?: string } | null;
 
 function userClient(block: Block, error: { message: string } | null = null) {
   const eq = vi.fn(() => ({ maybeSingle: async () => ({ data: block, error }) }));
@@ -24,52 +24,61 @@ function serviceClient(result: { data: { signedUrl: string } | null; error: { me
   return { client: { storage: { from } } as unknown as SupabaseClient, from, createSignedUrl };
 }
 
-const audio = { id: "b1", type: "audio", payload: { path: "l1/own.mp3", title: "A" }, published: true };
+const yes = async () => true;
+const audio = { lesson_part_id: "p1", id: "b1", type: "audio", payload: { path: "l1/own.mp3", title: "A" }, published: true };
 
 describe("signContentUrl", () => {
   it("signs only the block's own path for 1 hour in the content bucket", async () => {
     const u = userClient(audio);
     const s = serviceClient({ data: { signedUrl: "https://signed/x" }, error: null });
-    await expect(signContentUrl(u.client, "b1", s.client)).resolves.toEqual({ status: "ok", url: "https://signed/x" });
+    await expect(signContentUrl(u.client, "b1", yes, s.client)).resolves.toEqual({ status: "ok", url: "https://signed/x" });
     expect(s.from).toHaveBeenCalledWith("content");
     expect(s.createSignedUrl).toHaveBeenCalledWith("l1/own.mp3", 3600);
     expect(u.eq).toHaveBeenCalledWith("id", "b1");
   });
 
+  it("a locked part is indistinguishable from an invisible block and storage is not touched", async () => {
+    const s = serviceClient({ data: { signedUrl: "u" }, error: null });
+    const canPlay = vi.fn(async () => false);
+    expect(await signContentUrl(userClient(audio).client, "b1", canPlay, s.client)).toEqual({ status: "not_found" });
+    expect(canPlay).toHaveBeenCalledWith("p1");
+    expect(s.createSignedUrl).not.toHaveBeenCalled();
+  });
+
   it("works for rule_image blocks", async () => {
-    const u = userClient({ id: "b2", type: "rule_image", payload: { path: "r.png", alt: "x" }, published: true });
+    const u = userClient({ id: "b2", type: "rule_image", payload: { path: "r.png", alt: "x" }, published: true, lesson_part_id: "p1" });
     const s = serviceClient({ data: { signedUrl: "https://signed/i" }, error: null });
-    expect((await signContentUrl(u.client, "b2", s.client)).status).toBe("ok");
+    expect((await signContentUrl(u.client, "b2", yes, s.client)).status).toBe("ok");
     expect(s.createSignedUrl).toHaveBeenCalledWith("r.png", 3600);
   });
 
   it("404 (not_found) for a block the user cannot see, without touching storage", async () => {
     const s = serviceClient({ data: { signedUrl: "u" }, error: null });
-    expect(await signContentUrl(userClient(null).client, "b1", s.client)).toEqual({ status: "not_found" });
-    expect(await signContentUrl(userClient({ ...audio, published: false }).client, "b1", s.client)).toEqual({ status: "not_found" });
+    expect(await signContentUrl(userClient(null).client, "b1", yes, s.client)).toEqual({ status: "not_found" });
+    expect(await signContentUrl(userClient({ ...audio, published: false }).client, "b1", yes, s.client)).toEqual({ status: "not_found" });
     expect(s.createSignedUrl).not.toHaveBeenCalled();
   });
 
   it("not_found for non-media blocks and for malformed / traversing paths", async () => {
     const s = serviceClient({ data: { signedUrl: "u" }, error: null });
-    const text = { id: "t", type: "text", payload: { body: "x" }, published: true };
-    expect((await signContentUrl(userClient(text).client, "t", s.client)).status).toBe("not_found");
+    const text = { id: "t", type: "text", payload: { body: "x" }, published: true, lesson_part_id: "p1" };
+    expect((await signContentUrl(userClient(text).client, "t", yes, s.client)).status).toBe("not_found");
     const evil = { ...audio, payload: { path: "../other/secret.mp3", title: "A" } };
-    expect((await signContentUrl(userClient(evil).client, "b1", s.client)).status).toBe("not_found");
+    expect((await signContentUrl(userClient(evil).client, "b1", yes, s.client)).status).toBe("not_found");
     expect(s.createSignedUrl).not.toHaveBeenCalled();
   });
 
   it("returns 'unavailable' (not a throw) when the bucket or object is missing", async () => {
     const u = userClient(audio);
     expect(
-      await signContentUrl(u.client, "b1", serviceClient({ data: null, error: { message: "Bucket not found" } }).client),
+      await signContentUrl(u.client, "b1", yes, serviceClient({ data: null, error: { message: "Bucket not found" } }).client),
     ).toEqual({ status: "unavailable" });
-    expect(await signContentUrl(u.client, "b1", serviceClient("throw").client)).toEqual({ status: "unavailable" });
+    expect(await signContentUrl(u.client, "b1", yes, serviceClient("throw").client)).toEqual({ status: "unavailable" });
   });
 
   it("throws on a user-client read error (surfaced as 500 by the route)", async () => {
     await expect(
-      signContentUrl(userClient(null, { message: "rls" }).client, "b1", serviceClient("throw").client),
+      signContentUrl(userClient(null, { message: "rls" }).client, "b1", yes, serviceClient("throw").client),
     ).rejects.toThrow(/rls/);
   });
 });

@@ -1,6 +1,8 @@
 import "server-only";
 import { notFound } from "next/navigation";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
 import { parseBlock, type BlockResult } from "@/lib/blocks/types";
 import type { PartProgress } from "@/lib/path-status";
 import { getPathWith, supabasePathDb, type PartKind, type PathDb } from "@/server/path";
@@ -46,6 +48,12 @@ export interface LessonDb extends PathDb {
   blocks(partId: string): Promise<LessonBlockRow[]>;
   exercises(blockIds: string[]): Promise<LessonExerciseRow[]>;
   words(lessonId: string): Promise<LessonWord[]>;
+  /**
+   * Of the given exercise ids, those that are items of ANY test. RLS cannot say this for unpublished
+   * tests, so production reads it with the service client. Test items are graded by the test flow
+   * only (/api/attempts answers 404 for them), so the player must not offer them.
+   */
+  testItemIds(exerciseIds: string[]): Promise<string[]>;
   /** Exercise ids (of those given) the student has a completed submission for. */
   submittedExerciseIds(studentId: string, exerciseIds: string[]): Promise<string[]>;
 }
@@ -102,7 +110,9 @@ export async function getLessonPartWith(
   const refBlockIds = blocks.filter((b) => b.type === "exercise" || b.type === "speaking").map((b) => b.id);
   const exercises: Record<string, LessonExercise> = {};
   if (refBlockIds.length > 0) {
-    const fetched = await db.exercises(refBlockIds);
+    const rows0 = await db.exercises(refBlockIds);
+    const testIds = new Set(rows0.length > 0 ? await db.testItemIds(rows0.map((e) => e.id)) : []);
+    const fetched = rows0.filter((e) => !testIds.has(e.id));
     const owner = new Map(fetched.map((e) => [e.id, e.blockId]));
     for (const b of blocks) {
       if (b.type !== "exercise" && b.type !== "speaking") continue;
@@ -132,6 +142,12 @@ export async function getLessonPartWith(
   };
 }
 
+/** True when the part is in the student's path (published) and not locked: the lesson page's rule. */
+export async function canPlayPart(sb: Sb, studentId: string, partId: string): Promise<boolean> {
+  const path = await getPathWith(supabasePathDb(sb), studentId);
+  return path.modules.some((m) => m.lessons.some((l) => l.parts.some((p) => p.id === partId && p.status !== "locked")));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Production adapter
 // ---------------------------------------------------------------------------------------------
@@ -144,9 +160,17 @@ function ok<T>(res: { data: unknown; error: { message: string } | null }, what: 
 
 const one = <T>(v: T | T[] | null | undefined): T | null => (Array.isArray(v) ? (v[0] ?? null) : (v ?? null));
 
-export function supabaseLessonDb(sb: Sb): LessonDb {
+export function supabaseLessonDb(sb: Sb, service: () => SupabaseClient = createServiceClient): LessonDb {
   return {
     ...supabasePathDb(sb),
+
+    async testItemIds(exerciseIds) {
+      const data = ok<{ exercise_id: string }[] | null>(
+        await service().from("test_items").select("exercise_id").in("exercise_id", exerciseIds),
+        "test items",
+      );
+      return (data ?? []).map((r) => r.exercise_id);
+    },
 
     async part(partId) {
       type Row = {

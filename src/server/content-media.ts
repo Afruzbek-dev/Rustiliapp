@@ -37,15 +37,18 @@ function pathOf(block: BlockResult): string | null {
 export async function signContentUrl(
   clientUser: SupabaseClient,
   blockId: string,
+  /** The lock rule: true when the block's part is in the student's path and not locked. */
+  canPlay: (partId: string) => Promise<boolean>,
   service?: SupabaseClient,
 ): Promise<SignResult> {
   const { data, error } = await clientUser
     .from("blocks")
-    .select("id, type, payload, published")
+    .select("id, type, payload, published, lesson_part_id")
     .eq("id", blockId)
     .maybeSingle();
   if (error) throw new Error(`content-media: block: ${error.message}`);
   if (!data || data.published !== true) return { status: "not_found" };
+  if (typeof data.lesson_part_id !== "string" || !(await canPlay(data.lesson_part_id))) return { status: "not_found" };
   const path = pathOf(parseBlock({ id: data.id as string, type: data.type as string, payload: data.payload }));
   if (!path) return { status: "not_found" };
 

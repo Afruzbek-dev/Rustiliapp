@@ -64,11 +64,18 @@ export async function completePart(
   store: ProgressStore,
   studentId: string,
   partId: string,
+  /**
+   * allowEmpty (default false): a part with NO required work (no auto/review exercise, e.g. video/text
+   * only, or only arrange/listen_pick or test items) normally never completes from attempts. Only the
+   * explicit "finish the lesson" route passes true, after its own auth/visibility/lock checks.
+   * Residual risk, ACCEPTED: such a part can be completed without viewing its content blocks.
+   */
+  opts: { allowEmpty?: boolean } = {},
 ): Promise<{ completed: boolean; newlyCompleted: boolean; xpAwarded: number }> {
   const exercises = await store.getPartExercises(partId);
   const auto = exercises.filter((e) => e.checkMode === "auto" && isCheckableType(e.type));
   const review = exercises.filter((e) => e.checkMode === "review");
-  if (auto.length + review.length === 0) return { completed: false, newlyCompleted: false, xpAwarded: 0 };
+  if (auto.length + review.length === 0 && !opts.allowEmpty) return { completed: false, newlyCompleted: false, xpAwarded: 0 };
 
   const correct = await store.getCorrectRefs(studentId, partId);
   const done = new Set(correct.map((c) => `${c.exerciseId}\u0000${c.itemId ?? ""}`));

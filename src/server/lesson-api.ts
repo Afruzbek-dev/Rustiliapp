@@ -77,7 +77,7 @@ export async function handleCompleteRequest(
     const { partId } = body.data;
     if (!(await deps.canPlay(req.userId, partId))) return { status: 404, json: { error: "not_found" } };
 
-    const res = await completePart(deps.store, req.userId, partId);
+    const res = await completePart(deps.store, req.userId, partId, { allowEmpty: true });
     if (res.completed) {
       return { status: 200, json: { completed: true, newlyCompleted: res.newlyCompleted, xpAwarded: res.xpAwarded } };
     }
@@ -94,7 +94,9 @@ export async function handleCompleteRequest(
 export interface AudioListenedDeps {
   getRole(userId: string): Promise<string | null>;
   /** USER-scoped read (RLS): the block's type/payload, null when not visible. */
-  getVisibleBlock(blockId: string): Promise<{ id: string; type: string; payload: unknown } | null>;
+  getVisibleBlock(blockId: string): Promise<{ id: string; type: string; payload: unknown; partId?: string | null } | null>;
+  /** True when the part is in the student's path and not locked (same rule as the lesson page). */
+  canPlay(studentId: string, partId: string): Promise<boolean>;
   /** Service: bump the 'audio' daily task once per Tashkent day. */
   bumpAudioOnce(studentId: string): Promise<boolean>;
 }
@@ -112,7 +114,9 @@ export async function handleAudioListened(
     if (!body.success) return { status: 400, json: { error: "invalid_request" } };
     const block = await deps.getVisibleBlock(body.data.blockId);
     const parsed = block ? parseBlock(block) : null;
-    if (!parsed || parsed.type !== "audio") return { status: 404, json: { error: "not_found" } };
+    if (!parsed || parsed.type !== "audio" || !block?.partId || !(await deps.canPlay(req.userId, block.partId))) {
+      return { status: 404, json: { error: "not_found" } };
+    }
     const bumped = await deps.bumpAudioOnce(req.userId);
     return { status: 200, json: { ok: true, bumped } };
   } catch (e) {

@@ -13,6 +13,14 @@ const state = vi.hoisted(() => ({
   profile: null as { role: string; full_name: string } | null,
   pathname: "/teacher",
   count: 0 as number | null,
+  queueUser: null as string | null,
+}));
+vi.mock("@/server/curator-queue", () => ({
+  getQueue: async (userId: string) => {
+    state.queueUser = userId;
+    if (state.count === null) throw new Error("boom");
+    return { items: [], count: state.count, role: "teacher" };
+  },
 }));
 
 vi.mock("next/navigation", () => ({
@@ -77,9 +85,10 @@ describe("staff guard", () => {
 
   it("the badge count degrades to null on an error", async () => {
     state.count = 7;
-    expect(await pendingQueueCount()).toBe(7);
+    expect(await pendingQueueCount("u1")).toBe(7);
+    expect(state.queueUser).toBe("u1");
     state.count = null;
-    expect(await pendingQueueCount()).toBeNull();
+    expect(await pendingQueueCount("u1")).toBeNull();
   });
 });
 

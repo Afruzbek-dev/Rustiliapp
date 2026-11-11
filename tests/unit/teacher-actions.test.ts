@@ -8,7 +8,9 @@ const m = vi.hoisted(() => ({
   reject: vi.fn(),
   revalidate: vi.fn(),
   deps: vi.fn(),
+  send: vi.fn(),
 }));
+vi.mock("@/lib/telegram/api-client", () => ({ getTelegramApi: () => ({ sendMessage: m.send }) }));
 
 vi.mock("next/cache", () => ({ revalidatePath: m.revalidate }));
 vi.mock("@/server/guards", () => ({ requireStaff: m.requireStaff }));
@@ -48,6 +50,26 @@ describe("approve / reject actions", () => {
     expect(res).toEqual({ status: "success", message: "Ochildi" });
     expect(m.approve).toHaveBeenCalledWith({ service: true }, id, TEACHER);
     expect(m.revalidate).toHaveBeenCalledWith("/teacher");
+  });
+
+  it("DMs the student after a fresh approval, never on a repeat, and never fails the action", async () => {
+    const id = randomUUID();
+    m.approve.mockResolvedValueOnce({ outcome: "approved", studentTelegramId: 555 });
+    expect((await approveRequestAction(IDLE, form({ enrollmentId: id }))).status).toBe("success");
+    expect(m.send).toHaveBeenCalledWith(555, "Kurs ochildi! Ilovaga qaytib, davom eting.");
+
+    m.send.mockClear();
+    m.approve.mockResolvedValueOnce({ outcome: "already_approved", studentTelegramId: 555 });
+    await approveRequestAction(IDLE, form({ enrollmentId: id }));
+    m.approve.mockResolvedValueOnce({ outcome: "approved", studentTelegramId: null });
+    await approveRequestAction(IDLE, form({ enrollmentId: id }));
+    expect(m.send).not.toHaveBeenCalled();
+
+    m.send.mockRejectedValueOnce(Object.assign(new Error("blocked by user 555"), { name: "GrammyError" }));
+    m.approve.mockResolvedValueOnce({ outcome: "approved", studentTelegramId: 555 });
+    const res = await approveRequestAction(IDLE, form({ enrollmentId: id }));
+    expect(res.status).toBe("success");
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain("555");
   });
 
   it("maps the typed outcomes", async () => {

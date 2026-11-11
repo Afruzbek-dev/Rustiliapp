@@ -113,7 +113,8 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- lesson_completion: per lesson of the course (module, then lesson order): how many active
--- students finished ALL of its parts (a lesson without parts counts nobody).
+-- students finished ALL of its playable parts (a part with at least one published block, the same
+-- rule as published_part_ids); a lesson without a playable part counts nobody.
 -- ---------------------------------------------------------------------------
 create function public.lesson_completion(p_cohort uuid)
 returns table (lesson_id uuid, title text, completed_students int, total_active_students int)
@@ -136,10 +137,13 @@ begin
     select l.id, l.title,
            (select count(*)::int
               from public.stats_member_ids(p_cohort) as m(id)
-             where exists (select 1 from public.lesson_parts lp where lp.lesson_id = l.id)
+             where exists (select 1 from public.lesson_parts lp
+                            where lp.lesson_id = l.id
+                              and exists (select 1 from public.blocks b where b.lesson_part_id = lp.id and b.published))
                and not exists (
                  select 1 from public.lesson_parts lp
                   where lp.lesson_id = l.id
+                    and exists (select 1 from public.blocks b where b.lesson_part_id = lp.id and b.published)
                     and not exists (select 1 from public.part_progress pp
                                      where pp.lesson_part_id = lp.id and pp.student_id = m.id
                                        and pp.status = 'completed'))),
@@ -211,17 +215,21 @@ language plpgsql stable security definer set search_path = public as $$
 declare
   v_today date := public.tashkent_day(now());
   v_days  int  := least(greatest(coalesce(p_days, 3), 1), 60);
+  v_course uuid;
 begin
   if p_cohort is null or not public.teaches_cohort(p_cohort) then
     return;
   end if;
+  select c.course_id into v_course from public.cohorts c where c.id = p_cohort;
   return query
     select m.id, p.full_name, p.telegram_id is not null,
            (select max(a.day) from public.daily_activity a where a.student_id = m.id and a.xp > 0),
            (select lp.title
               from public.part_progress pp
               join public.lesson_parts lp on lp.id = pp.lesson_part_id
-             where pp.student_id = m.id
+               join public.lessons l on l.id = lp.lesson_id
+               join public.modules mo on mo.id = l.module_id
+             where pp.student_id = m.id and mo.course_id = v_course
              order by coalesce(pp.completed_at, pp.started_at) desc, lp.id
              limit 1)
     from public.stats_member_ids(p_cohort) as m(id)

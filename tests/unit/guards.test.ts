@@ -78,7 +78,7 @@ describe("guards", () => {
   it("curator passes requireCurator but not requireStaff", async () => {
     state.role = "curator";
     expect(await target(requireCurator)).toBeNull();
-    expect(await target(requireStaff)).toBe("/home");
+    expect(await target(requireStaff)).toBe("/curator");
   });
 
   it("teacher passes requireStaff but not requireCurator", async () => {

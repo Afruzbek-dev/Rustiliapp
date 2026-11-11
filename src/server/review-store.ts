@@ -22,30 +22,43 @@ export function createSupabaseReviewStore(service: SupabaseClient): ReviewStore 
         p_channel: a.channel,
         p_scores: a.scores,
         p_comment: a.comment,
+        p_allow_override: a.allowOverride,
       });
       check("submit_review", error);
       const r = (Array.isArray(data) ? data[0] : data) as
-        | { outcome: string; review_id: string | null; total: number | string | null; is_override: boolean | null; student_id: string | null }
+        | {
+            outcome: string;
+            review_id: string | null;
+            total: number | string | null;
+            is_override: boolean | null;
+            student_id: string | null;
+            xp_awarded: boolean | null;
+          }
         | null;
       if (!r) throw new TelegramDbError("submit_review", "empty");
       if (r.outcome === "ok" && r.review_id && r.student_id && r.total !== null) {
-        return { outcome: "ok", reviewId: r.review_id, total: Number(r.total), isOverride: r.is_override === true, studentId: r.student_id };
+        return {
+          outcome: "ok",
+          reviewId: r.review_id,
+          total: Number(r.total),
+          isOverride: r.is_override === true,
+          studentId: r.student_id,
+          xpAwarded: r.xp_awarded === true,
+        };
       }
-      if (r.outcome === "forbidden" || r.outcome === "not_found" || r.outcome === "incomplete" || r.outcome === "already_reviewed") {
+      if (r.outcome === "duplicate" && r.review_id && r.total !== null) {
+        return { outcome: "duplicate", reviewId: r.review_id, total: Number(r.total) };
+      }
+      if (
+        r.outcome === "forbidden" ||
+        r.outcome === "not_found" ||
+        r.outcome === "incomplete" ||
+        r.outcome === "unsupported_kind" ||
+        r.outcome === "already_reviewed"
+      ) {
         return { outcome: r.outcome };
       }
       throw new TelegramDbError("submit_review", "unexpected");
-    },
-
-    async awardSpeakingXp(studentId, amount, submissionId) {
-      const { data, error } = await service.rpc("award_xp", {
-        p_student: studentId,
-        p_amount: amount,
-        p_reason: "speaking_reviewed",
-        p_ref: submissionId,
-      });
-      check("award_xp", error);
-      return data === true;
     },
 
     async getNotice(submissionId, reviewerId): Promise<ReviewNotice | null> {
@@ -95,15 +108,33 @@ export function createSupabaseReviewBotStore(service: SupabaseClient): ReviewBot
       check("review_authority", error);
       return data === "curator" || data === "staff" ? data : null;
     },
-    async setDraft(submissionId, criterion, value) {
-      const { data, error } = await service.rpc("set_draft_score", { p_submission: submissionId, p_criterion: criterion, p_value: value });
+    async setDraft(submissionId, actorId, criterion, value) {
+      const { data, error } = await service.rpc("set_draft_score", {
+        p_submission: submissionId,
+        p_actor: actorId,
+        p_criterion: criterion,
+        p_value: value,
+      });
       check("set_draft_score", error);
       return data ? only(data) : null;
     },
     async getDraftState(submissionId) {
       const { data, error } = await service.from("submissions").select("status, draft_scores").eq("id", submissionId).maybeSingle();
       check("getDraftState", error);
-      return data ? { status: data.status as "pending" | "reviewed", draft: only(data.draft_scores) } : null;
+      if (!data) return null;
+      // the FIRST review (the one that won) tells a same-curator double tap from a lost race
+      const { data: first, error: e2 } = await service
+        .from("reviews")
+        .select("reviewer_id")
+        .eq("submission_id", submissionId)
+        .order("created_at", { ascending: true })
+        .limit(1);
+      check("getDraftState(reviews)", e2);
+      return {
+        status: data.status as "pending" | "reviewed",
+        draft: only(data.draft_scores),
+        firstReviewerId: ((first ?? [])[0]?.reviewer_id as string | undefined) ?? null,
+      };
     },
   };
 }

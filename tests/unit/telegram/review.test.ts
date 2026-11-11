@@ -133,7 +133,7 @@ describe("telegram rubric flow", () => {
     await t.press(101, cb("save"));
     expect(t.w.reviews).toHaveLength(1);
     expect(t.w.xp).toHaveLength(1);
-    expect(answers(t.sent).at(-1)).toMatchObject({ text: RV_MSG.alreadyReviewed, show_alert: true });
+    expect(answers(t.sent).at(-1)).toMatchObject({ text: RV_MSG.alreadySaved, show_alert: true });
   });
 
   it("simultaneous saves by two taps: exactly one review", async () => {
@@ -173,7 +173,7 @@ describe("telegram rubric flow", () => {
   it("a tap on an already reviewed (e.g. web) submission does not change the draft", async () => {
     const t = setup({ sub: { status: "reviewed" } });
     await t.press(101, cb("pr", 4));
-    expect(answers(t.sent).at(-1)).toMatchObject({ text: RV_MSG.alreadyReviewed });
+    expect(answers(t.sent).at(-1)).toMatchObject({ text: RV_MSG.alreadyByOther });
     expect(t.w.sub.draft).toEqual({});
   });
 
@@ -204,6 +204,40 @@ describe("telegram rubric flow", () => {
     await t.press(101, cb("save"));
     expect(t.w.reviews).toHaveLength(1);
     expect(t.w.reviews[0]!.channel).toBe("web");
-    expect(answers(t.sent).at(-1)).toMatchObject({ show_alert: true });
+    expect(answers(t.sent).at(-1)).toMatchObject({ text: RV_MSG.alreadySaved, show_alert: true });
+  });
+
+  it("another reviewer tapping after the first review is told ANOTHER reviewer already reviewed", async () => {
+    const t = setup();
+    for (const [c, v] of [["cm", 5], ["pr", 5], ["gr", 5], ["fl", 5]] as const) await t.press(101, cb(c, v));
+    await t.press(101, cb("save"));
+    await t.press(103, cb("save")); // the teacher
+    expect(answers(t.sent).at(-1)).toMatchObject({ text: RV_MSG.alreadyByOther });
+    await t.press(103, cb("pr", 2));
+    expect(answers(t.sent).at(-1)).toMatchObject({ text: RV_MSG.alreadyByOther });
+    expect(t.w.reviews).toHaveLength(1);
+  });
+
+  it("an incomplete submission answers 'Topshiriq hali to'liq yuklanmagan'", async () => {
+    const t = setup({ sub: { complete: false } });
+    for (const [c, v] of [["cm", 5], ["pr", 5], ["gr", 5], ["fl", 5]] as const) await t.press(101, cb(c, v));
+    await t.press(101, cb("save"));
+    expect(answers(t.sent).at(-1)).toMatchObject({ text: RV_MSG.notUploaded, show_alert: true });
+    expect(t.w.reviews).toHaveLength(0);
+  });
+
+  it("a curator who is the submission's own student is denied (no self-review), drafts included", async () => {
+    const t = setup({ sub: { studentId: CURATOR } });
+    await t.press(101, cb("pr", 4));
+    await t.press(101, cb("save"));
+    expect(answers(t.sent).map((a) => a.text)).toEqual([RV_MSG.denied, RV_MSG.denied]);
+    expect(t.w.sub.draft).toEqual({});
+  });
+
+  it("draft writes are authorised in the store too (defence in depth: even a skipped handler check cannot write)", async () => {
+    const t = setup();
+    await expect(t.w.store.setDraft(SUB, "99999999-9999-4999-8999-999999999999", "grammar", 3)).rejects.toThrow();
+    await expect(t.w.store.setDraft(SUB, "11111111-1111-4111-8111-111111111111", "grammar", 3)).rejects.toThrow(); // the student
+    expect(t.w.sub.draft).toEqual({});
   });
 });

@@ -67,12 +67,51 @@ describe("submitReview", () => {
   it("teacher override after a review is recorded with is_override, pays no second XP, history kept", async () => {
     const w = createReviewWorld();
     await submitReview(input(), w.deps);
-    const r = await submitReview(input({ reviewerProfileId: TEACHER, scores: { completeness: 2, pronunciation: 2, grammar: 2, fluency: 2 } }), w.deps);
+    const two = { completeness: 2, pronunciation: 2, grammar: 2, fluency: 2 };
+    const r = await submitReview(input({ reviewerProfileId: TEACHER, scores: two, override: true }), w.deps);
     expect(r).toMatchObject({ isOverride: true, xpAwarded: false, total: 2 });
     expect(w.reviews.map((x) => x.isOverride)).toEqual([false, true]);
     expect(w.xp).toHaveLength(1);
     expect(w.dms[1]!.text).toContain("yangilandi");
     expect(w.edits).toHaveLength(2);
+  });
+
+  it("an override must be explicit: staff without the flag, curators with it and Telegram always get already_reviewed", async () => {
+    const w = createReviewWorld();
+    await submitReview(input(), w.deps);
+    expect(await code(submitReview(input({ reviewerProfileId: TEACHER }), w.deps))).toBe("already_reviewed");
+    expect(await code(submitReview(input({ reviewerProfileId: ADMIN, override: false }), w.deps))).toBe("already_reviewed");
+    expect(await code(submitReview(input({ reviewerProfileId: CURATOR, override: true }), w.deps))).toBe("already_reviewed");
+    expect(await code(submitReview(input({ reviewerProfileId: TEACHER, override: true, channel: "telegram" }), w.deps))).toBe("already_reviewed");
+    expect(w.submitCalls.at(-1)).toEqual({ allowOverride: false, channel: "telegram" });
+    expect(w.reviews).toHaveLength(1);
+  });
+
+  it("a double submit of the same staff override creates no extra row and no second DM", async () => {
+    const w = createReviewWorld();
+    await submitReview(input(), w.deps);
+    const two = { completeness: 2, pronunciation: 2, grammar: 2, fluency: 2 };
+    await submitReview(input({ reviewerProfileId: TEACHER, scores: two, override: true }), w.deps);
+    const again = await submitReview(input({ reviewerProfileId: TEACHER, scores: two, override: true }), w.deps);
+    expect(again).toMatchObject({ isOverride: true, xpAwarded: false });
+    expect(w.reviews).toHaveLength(2);
+    expect(w.dms).toHaveLength(2); // first review + one override
+    expect(w.edits).toHaveLength(2);
+  });
+
+  it("nobody reviews their own submission (curator, teacher and admin who are also the student)", async () => {
+    for (const self of [CURATOR, TEACHER, ADMIN]) {
+      const w = createReviewWorld({ sub: { studentId: self } });
+      expect(await code(submitReview(input({ reviewerProfileId: self }), w.deps))).toBe("forbidden");
+      expect(w.xp).toHaveLength(0);
+      expect(w.reviews).toHaveLength(0);
+    }
+  });
+
+  it("text submissions are not reviewable yet (unsupported_kind) and earn no XP", async () => {
+    const w = createReviewWorld({ sub: { kind: "text" } });
+    expect(await code(submitReview(input(), w.deps))).toBe("unsupported_kind");
+    expect(w.xp).toHaveLength(0);
   });
 
   it("teacher and admin may review a pending submission as the first (non-override) review", async () => {
@@ -116,15 +155,6 @@ describe("submitReview", () => {
     expect(w.sub.status).toBe("reviewed");
   });
 
-  it("an XP failure is logged (op/class only) and does not fail the review", async () => {
-    const err = vi.spyOn(console, "error").mockImplementation(() => {});
-    const w = createReviewWorld({ failXp: true });
-    const r = await submitReview(input(), w.deps);
-    expect(r.xpAwarded).toBe(false);
-    expect(w.reviews).toHaveLength(1);
-    expect(JSON.stringify(err.mock.calls)).toContain("award_xp");
-    expect(JSON.stringify(err.mock.calls)).not.toContain("Ali");
-  });
 
   it("an audio submission edits the message text (kind is passed through)", async () => {
     const w = createReviewWorld({ sub: { kind: "audio" } });
@@ -167,6 +197,15 @@ describe("POST /api/reviews logic", () => {
     const res = await handleReviewRequest(r.deps, { userId: CURATOR, body });
     expect(res).toEqual({ status: 200, json: { ok: true, total: 4.25, isOverride: false } });
     expect(r.submit.mock.calls[0]![0]).toMatchObject({ submissionId: SUB, reviewerProfileId: CURATOR, channel: "web", comment: "ok" });
+  });
+
+  it("accepts an optional boolean `override` (strict) and passes it on; anything else is a 400", async () => {
+    const r = route();
+    await handleReviewRequest(r.deps, { userId: TEACHER, body: { ...body, override: true } });
+    expect(r.submit.mock.calls[0]![0]).toMatchObject({ reviewerProfileId: TEACHER, override: true });
+    for (const o of ["true", 1, null]) {
+      expect((await handleReviewRequest(r.deps, { userId: TEACHER, body: { ...body, override: o } })).status).toBe(400);
+    }
   });
 
   it("maps 403 / 404 / 409 / 409 / 500", async () => {

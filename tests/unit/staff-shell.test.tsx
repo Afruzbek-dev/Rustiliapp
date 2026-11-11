@@ -98,20 +98,21 @@ describe("navigation per role", () => {
       "Bosh panel",
       "Kurslar va darslar",
       "O'quvchilar",
+      "Guruhlar",
       "Tekshirish navbati",
       "Kuratorlar",
       "Testlar",
       "Reyting",
       "Sozlamalar",
     ]);
-    expect(navItemsFor("admin")).toHaveLength(8);
+    expect(navItemsFor("admin")).toHaveLength(9);
     expect(navItemsFor("curator").map((i) => [i.label, i.href])).toEqual([["Tekshirish navbati", "/curator"]]);
   });
 
   it("renders links, marks the current page and shows the pending badge", () => {
     render(<Sidebar role="teacher" name="Zarina Kasimova" pending={12} />);
     const nav = screen.getByRole("navigation", { name: "Ustoz paneli" });
-    expect(within(nav).getAllByRole("link")).toHaveLength(8);
+    expect(within(nav).getAllByRole("link")).toHaveLength(9);
     expect(within(nav).getByRole("link", { name: "Bosh panel" })).toHaveAttribute("aria-current", "page");
     expect(within(nav).getByRole("link", { name: "Testlar" })).not.toHaveAttribute("aria-current");
     expect(within(nav).getByRole("link", { name: /Tekshirish navbati/ })).toHaveTextContent("12");

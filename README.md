@@ -71,6 +71,22 @@ CI (`.github/workflows/ci.yml`) runs lint, typecheck, unit tests, DB tests and t
    It calls `setWebhook` with `APP_URL/api/telegram/webhook`, the secret token and
    `allowed_updates: ["message", "callback_query"]`. The token is never printed. Re-run after every domain change.
 
+## Managing students, cohorts and curators (`/teacher/students`, `/teacher/cohorts`, `/teacher/curators`)
+
+- Writes go through service-role SQL functions (`manage_*`, migration 0017) that re-check the acting teacher/admin
+  themselves; the actor always comes from the verified session. Reads use the user-scoped client, so another
+  teacher's cohort is empty / 404.
+- **Closing a cohort** sets `access_until = now()`: new requests find no open cohort and pending ones cannot be approved
+  (`cohort_closed`); already active students keep their own expiry. Opening needs a future date. The bot assigns new
+  requests to the newest open cohort, so the share link is the bot link (`t.me/<bot>`) / the site login page.
+- **Curator role** is granted only by `manage_assign_curator`: the target needs a profile with a linked Telegram and
+  no live student enrollment. Candidates are found by exact phone, Telegram id or @username.
+- **Manual Telegram link** (profile has a phone but no `telegram_id`, so the bot refuses it as "phone taken"): the teacher
+  enters the student's numeric Telegram id on the student page. It is accepted only if the Bot API `getChat` confirms a
+  private chat with that user (the student must have pressed Start in the bot); the id is stored on the profile and
+  mirrored into the auth user's `app_metadata`, which the login exchange requires. Usernames are not accepted
+  (the Bot API cannot resolve them).
+
 ## Deployment
 
 - **Testing:** Vercel Hobby works. Set all environment variables in the project settings, deploy, then set the webhook.

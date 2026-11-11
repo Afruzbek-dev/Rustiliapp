@@ -373,3 +373,39 @@ export async function rejectEnrollment(
   const again = (await loadContext(db, enrollmentId, actorProfileId)).enrollment;
   return { ...base, outcome: again.status === "rejected" ? "already_rejected" : "conflict", enrollment: again };
 }
+
+export type ExpireResult = {
+  outcome: "expired" | "already_expired" | "conflict";
+  enrollment: EnrollmentRow;
+  studentName: string;
+};
+
+/**
+ * Ends an ACTIVE enrollment now (status `expired`, `expires_at` = now unless it was earlier), same
+ * authorization as approval. Idempotent for an already expired one; pending/rejected rows are a
+ * "conflict" (reject them instead). Re-approving or extending the expiry brings the student back.
+ */
+export async function expireEnrollment(
+  db: ServiceClient,
+  enrollmentId: string,
+  actorProfileId: string,
+  now = new Date(),
+): Promise<ExpireResult> {
+  const ctx = await loadContext(db, enrollmentId, actorProfileId);
+  const base = { studentName: ctx.studentName };
+  if (ctx.enrollment.status === "expired") return { ...base, outcome: "already_expired", enrollment: ctx.enrollment };
+  if (ctx.enrollment.status !== "active") return { ...base, outcome: "conflict", enrollment: ctx.enrollment };
+  const current = ctx.enrollment.expires_at;
+  const endsAt = current !== null && new Date(current).getTime() < now.getTime() ? current : now.toISOString();
+  const { data, error } = await db
+    .from("enrollments")
+    .update({ status: "expired", expires_at: endsAt })
+    .eq("id", enrollmentId)
+    .eq("status", "active")
+    .select(COLUMNS);
+  if (error) dbFail("expire", error);
+  const updated = ((data as EnrollmentRow[] | null) ?? [])[0];
+  if (updated) return { ...base, outcome: "expired", enrollment: updated };
+  const again = (await loadContext(db, enrollmentId, actorProfileId)).enrollment;
+  return { ...base, outcome: again.status === "expired" ? "already_expired" : "conflict", enrollment: again };
+}

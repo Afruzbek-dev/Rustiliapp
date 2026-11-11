@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { asService, sql, withUser } from './helpers';
+import { asService, pool, sql, withUser } from './helpers';
 import {
   createActiveStudent,
   createBlock,
@@ -243,25 +243,136 @@ describe('0016 content editor', () => {
       await rejects(call('editor_delete_block', [B.teacher, blk]), /forbidden/);
     });
 
+    // {blockId: updated_at} exactly as the server's check would capture it
+    const checked = async (lesson: string) => {
+      const rows = await sql(
+        `select b.id, b.updated_at::text as t from public.blocks b join public.lesson_parts p on p.id = b.lesson_part_id where p.lesson_id = $1`,
+        [lesson],
+      );
+      return JSON.stringify(Object.fromEntries(rows.map((r) => [r.id, r.t])));
+    };
+    const publish = async (lesson: string, on: boolean, actor = A.teacher) =>
+      call<{ editor_set_lesson_published: number }>('editor_set_lesson_published', [actor, lesson, on, on ? await checked(lesson) : null]);
+
     it('publish flips all blocks of the lesson; student sees them only when published', async () => {
       const l = await createLesson(A.course);
-      await rejects(call('editor_set_lesson_published', [A.teacher, l.lesson, true]), /no blocks/);
+      await rejects(publish(l.lesson, true), /no blocks/);
       const blk = (await call<{ block_id: string }>('editor_create_block', [A.teacher, l.part1, 'text', JSON.stringify({ body: 'x' }), null]))[0].block_id;
       const seen = () => withUser(student, (q) => q('select id from public.blocks where id = $1', [blk]));
       expect(await seen()).toHaveLength(0);
-      await rejects(call('editor_set_lesson_published', [B.teacher, l.lesson, true]), /forbidden/);
-      expect((await call<{ editor_set_lesson_published: number }>('editor_set_lesson_published', [A.teacher, l.lesson, true]))[0].editor_set_lesson_published).toBe(1);
+      await rejects(publish(l.lesson, true, B.teacher), /forbidden/);
+      expect((await publish(l.lesson, true))[0].editor_set_lesson_published).toBe(1);
       expect(await seen()).toHaveLength(1);
       // publishing is not a content change: open editors keep a valid concurrency token
-      const [tok] = await sql('select updated_at::text as t from public.blocks where id = $1', [blk]);
       const created = (await call<{ block_id: string; updated_at: string }>('editor_create_block', [A.teacher, l.part2, 'text', '{}', null]))[0];
-      await call('editor_set_lesson_published', [A.teacher, l.lesson, false]);
-      await call('editor_set_lesson_published', [A.teacher, l.lesson, true]);
+      await publish(l.lesson, false);
+      await publish(l.lesson, true);
       const [after] = await sql('select updated_at::text as t from public.blocks where id = $1', [created.block_id]);
       expect(after.t).toBe(created.updated_at);
-      expect(tok.t).toBeTruthy();
-      await call('editor_set_lesson_published', [A.teacher, l.lesson, false]);
+      await publish(l.lesson, false);
       expect(await seen()).toHaveLength(0);
+    });
+
+    it('M1: publish is atomic with its check (changed / added blocks, missing key, test item)', async () => {
+      const l = await createLesson(A.course);
+      const blk = (await call<{ block_id: string; updated_at: string }>('editor_create_block', [A.teacher, l.part1, 'text', JSON.stringify({ body: 'x' }), null]))[0];
+      // the client validated the lesson, then a concurrent save edited the block
+      const stale = await checked(l.lesson);
+      await call('editor_save_block', [A.teacher, blk.block_id, JSON.stringify({ body: 'edited after the check' }), null, blk.updated_at]);
+      await rejects(call('editor_set_lesson_published', [A.teacher, l.lesson, true, stale]), /changed since/);
+      expect(await sql('select published from public.blocks where id = $1', [blk.block_id])).toEqual([{ published: false }]);
+      // a block added after the check
+      const fresh = await checked(l.lesson);
+      await call('editor_create_block', [A.teacher, l.part2, 'text', '{}', null]);
+      await rejects(call('editor_set_lesson_published', [A.teacher, l.lesson, true, fresh]), /changed since/);
+      // a missing token map is refused
+      await rejects(call('editor_set_lesson_published', [A.teacher, l.lesson, true, null]), /checked block tokens/);
+
+      // an exercise without a key / a test item cannot go live even with matching tokens
+      const l2 = await createLesson(A.course);
+      const ex = (await call<{ block_id: string }>('editor_create_block', [
+        A.teacher, l2.part1, 'exercise', '{}',
+        JSON.stringify({ type: 'choose', prompt: 'p', payload: { items: [] }, key: {} }),
+      ]))[0].block_id;
+      const [{ id: exId }] = await sql('select id from public.exercises where block_id = $1', [ex]);
+      await sql('delete from public.exercise_keys where exercise_id = $1', [exId]);
+      await rejects(publish(l2.lesson, true), /test item or has no answer key/);
+      await sql(`insert into public.exercise_keys (exercise_id, answer) values ($1, '{}')`, [exId]);
+      const [t] = await sql(`insert into public.tests (course_id, title) values ($1, 'T') returning id`, [A.course]);
+      await sql(`insert into public.test_items (test_id, exercise_id, section, position) values ($1, $2, 'grammar', 1)`, [t.id, exId]);
+      await rejects(publish(l2.lesson, true), /test item or has no answer key/);
+    });
+
+    it('I1: a non-object / missing key never erases the key of an existing exercise', async () => {
+      const l = await createLesson(A.course);
+      const b = (await call<{ block_id: string; updated_at: string }>('editor_create_block', [
+        A.teacher, l.part1, 'exercise', '{}',
+        JSON.stringify({ type: 'choose', prompt: 'p', payload: { items: [] }, key: { a: 1 } }),
+      ]))[0];
+      const [{ id: exId }] = await sql('select id from public.exercises where block_id = $1', [b.block_id]);
+      const s1 = (await call<{ updated_at: string }>('editor_save_block', [
+        A.teacher, b.block_id, null, JSON.stringify({ type: 'choose', prompt: 'q', payload: { items: [] }, key: null }), b.updated_at,
+      ]))[0];
+      const s2 = (await call<{ updated_at: string }>('editor_save_block', [
+        A.teacher, b.block_id, null, JSON.stringify({ type: 'choose', prompt: 'r', payload: { items: [] }, key: 'junk' }), s1.updated_at,
+      ]))[0];
+      expect(s2.updated_at).toBeTruthy();
+      expect((await sql('select answer from public.exercise_keys where exercise_id = $1', [exId]))[0].answer).toEqual({ a: 1 });
+    });
+
+    it('I2: deleting a block whose exercise is a test item is refused (in_test)', async () => {
+      const l = await createLesson(A.course);
+      const blk = await createBlock(l.part1, 1, false);
+      const ex = await createExercise(blk);
+      const [t] = await sql(`insert into public.tests (course_id, title) values ($1, 'T') returning id`, [A.course]);
+      await sql(`insert into public.test_items (test_id, exercise_id, section, position) values ($1, $2, 'grammar', 1)`, [t.id, ex]);
+      expect((await call<{ editor_delete_block: string }>('editor_delete_block', [A.teacher, blk]))[0].editor_delete_block).toBe('in_test');
+      expect(await sql('select 1 from public.blocks where id = $1', [blk])).toHaveLength(1);
+    });
+
+    it('M5: the exercise type is locked once students answered it', async () => {
+      const l = await createLesson(A.course);
+      const b = (await call<{ block_id: string; updated_at: string }>('editor_create_block', [
+        A.teacher, l.part1, 'exercise', '{}',
+        JSON.stringify({ type: 'choose', prompt: 'p', payload: { items: [] }, key: {} }),
+      ]))[0];
+      const [{ id: exId }] = await sql('select id from public.exercises where block_id = $1', [b.block_id]);
+      const same = (await call<{ outcome: string; updated_at: string }>('editor_save_block', [
+        A.teacher, b.block_id, null, JSON.stringify({ type: 'choose', prompt: 'ok', payload: { items: [] }, key: {} }), b.updated_at,
+      ]))[0];
+      expect(same.outcome).toBe('ok');
+      await sql(`insert into public.attempts (student_id, exercise_id, answer, is_correct) values ($1, $2, '{}', true)`, [student, exId]);
+      await rejects(
+        call('editor_save_block', [A.teacher, b.block_id, null, JSON.stringify({ type: 'classify', prompt: 'x', payload: {}, key: {} }), same.updated_at]),
+        /type locked/,
+      );
+      // same type is still editable
+      expect((await call<{ outcome: string }>('editor_save_block', [A.teacher, b.block_id, null, JSON.stringify({ type: 'choose', prompt: 'again', payload: { items: [] }, key: {} }), same.updated_at]))[0].outcome).toBe('ok');
+      expect((await sql('select * from public.exercises_with_student_data($1)', [[exId]])).map((r) => r.exercises_with_student_data)).toEqual([exId]);
+    });
+
+    it('M2: delete locks the exercise: a concurrent attempt cannot slip past the student-data check', async () => {
+      const l = await createLesson(A.course);
+      const blk = await createBlock(l.part1, 1, false);
+      const ex = await createExercise(blk);
+      const c1 = await pool.connect();
+      const c2 = await pool.connect();
+      try {
+        await c1.query('begin');
+        const r = await c1.query('select public.editor_delete_block($1, $2) as r', [A.teacher, blk]);
+        expect(r.rows[0].r).toBe('ok'); // deleted, not committed: holds the exercise lock
+        await c2.query('begin');
+        const insert = c2.query(`insert into public.attempts (student_id, exercise_id, answer, is_correct) values ($1, $2, '{}', true)`, [student, ex]);
+        const settled = insert.then(() => 'inserted', (e: Error) => e.message);
+        await new Promise((res) => setTimeout(res, 150));
+        await c1.query('commit');
+        expect(await settled).toMatch(/foreign key|violates/);
+      } finally {
+        await c2.query('rollback').catch(() => undefined);
+        await c1.query('rollback').catch(() => undefined);
+        c1.release();
+        c2.release();
+      }
     });
 
     it('words: import dedupes, links, validates; save/unlink are authorised', async () => {

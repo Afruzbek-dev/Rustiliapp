@@ -23,7 +23,8 @@
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (
   'content', 'content', false, 20971520,
-  array['audio/mpeg', 'audio/mp4', 'audio/ogg', 'audio/wav', 'audio/webm', 'image/png', 'image/jpeg', 'image/webp']
+  array['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/x-m4a', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/webm',
+        'image/png', 'image/jpeg', 'image/webp']
 )
 on conflict (id) do nothing;
 
@@ -257,13 +258,15 @@ create function public.editor_write_exercise(p_block uuid, p_course uuid, p_exer
 language plpgsql security definer set search_path = public as $$
 declare
   v_ex uuid;
+  v_type public.exercise_type := (p_exercise ->> 'type')::public.exercise_type;
+  v_old public.exercise_type;
+  v_key jsonb := p_exercise -> 'key';
 begin
-  select e.id into v_ex from public.exercises e where e.block_id = p_block;
+  select e.id, e.type into v_ex, v_old from public.exercises e where e.block_id = p_block for update;
   if v_ex is null then
     insert into public.exercises (course_id, block_id, type, prompt, payload, check_mode, xp)
     values (
-      p_course, p_block,
-      (p_exercise ->> 'type')::public.exercise_type,
+      p_course, p_block, v_type,
       nullif(p_exercise ->> 'prompt', ''),
       coalesce(p_exercise -> 'payload', '{}'::jsonb),
       coalesce(p_exercise ->> 'check_mode', 'auto')::public.check_mode,
@@ -271,20 +274,29 @@ begin
     )
     returning id into v_ex;
   else
+    -- M5: students already answered it, so its type (and so the meaning of their answers) is frozen
+    if v_old is distinct from v_type
+       and (exists (select 1 from public.attempts a where a.exercise_id = v_ex)
+            or exists (select 1 from public.submissions s where s.exercise_id = v_ex)) then
+      raise exception 'exercise type locked' using errcode = '23514';
+    end if;
     update public.exercises
-       set type = (p_exercise ->> 'type')::public.exercise_type,
+       set type = v_type,
            prompt = nullif(p_exercise ->> 'prompt', ''),
            payload = coalesce(p_exercise -> 'payload', '{}'::jsonb),
            check_mode = coalesce(p_exercise ->> 'check_mode', 'auto')::public.check_mode,
            xp = coalesce((p_exercise ->> 'xp')::int, 10)
      where id = v_ex;
   end if;
-  if p_exercise ? 'key' and jsonb_typeof(p_exercise -> 'key') is distinct from 'null' then
-    insert into public.exercise_keys (exercise_id, answer) values (v_ex, p_exercise -> 'key')
-    on conflict (exercise_id) do update set answer = excluded.answer;
-  else
+  if v_type = 'speaking' then
     delete from public.exercise_keys where exercise_id = v_ex;
+  elsif v_key is not null and jsonb_typeof(v_key) in ('object', 'array') then
+    insert into public.exercise_keys (exercise_id, answer) values (v_ex, v_key)
+    on conflict (exercise_id) do update set answer = excluded.answer;
+  elsif not exists (select 1 from public.exercise_keys where exercise_id = v_ex) then
+    insert into public.exercise_keys (exercise_id, answer) values (v_ex, '{}'::jsonb);
   end if;
+  -- a missing / non-object key NEVER erases the key of an existing exercise
   update public.blocks set payload = jsonb_build_object('exerciseId', v_ex) where id = p_block;
 end
 $$;
@@ -363,10 +375,21 @@ end
 $$;
 
 -- 'ok' | 'has_student_data' (students already answered it: deleting would erase their work)
+--      | 'in_test' (the exercise is an item of a test: deleting would silently shrink the test).
+-- The exercise rows are locked FOR UPDATE first: an attempt insert takes a FOR KEY SHARE lock on its
+-- exercise (foreign key), so it either commits before our check (we see it) or waits and then fails
+-- on the deleted row. Nothing can slip in between the check and the delete.
 create function public.editor_delete_block(p_actor uuid, p_block uuid) returns text
 language plpgsql security definer set search_path = public as $$
 begin
   perform public.editor_require(p_actor, public.block_course_id(p_block));
+  perform 1 from public.blocks where id = p_block for update;
+  perform 1 from public.exercises where block_id = p_block for update;
+  if exists (
+       select 1 from public.exercises e join public.test_items ti on ti.exercise_id = e.id where e.block_id = p_block
+     ) then
+    return 'in_test';
+  end if;
   if exists (
        select 1 from public.exercises e
        where e.block_id = p_block
@@ -403,16 +426,47 @@ end
 $$;
 
 -- Flips every block of the lesson. Returns the number of blocks changed.
-create function public.editor_set_lesson_published(p_actor uuid, p_lesson uuid, p_published boolean) returns int
+-- Publishing is ATOMIC with its check: p_checked is {blockId: updated_at} exactly as the server
+-- validated it. The blocks are locked FOR UPDATE and compared; any block added, removed or edited
+-- since (40001) , a missing answer key or a test-item exercise (23514) refuses the publish, so a
+-- concurrent save can never go live unchecked.
+create function public.editor_set_lesson_published(
+  p_actor uuid, p_lesson uuid, p_published boolean, p_checked jsonb default null
+) returns int
 language plpgsql security definer set search_path = public as $$
 declare
   v_n int;
+  v_have int;
+  v_bad int;
 begin
   perform public.editor_require(p_actor, public.lesson_course_id(p_lesson));
-  if p_published and not exists (
-       select 1 from public.blocks b join public.lesson_parts p on p.id = b.lesson_part_id where p.lesson_id = p_lesson
-     ) then
-    raise exception 'lesson has no blocks' using errcode = '22023';
+  perform 1 from public.lesson_parts where lesson_id = p_lesson order by id for update;
+  perform 1 from public.blocks b join public.lesson_parts p on p.id = b.lesson_part_id
+   where p.lesson_id = p_lesson order by b.id for update of b;
+  if p_published then
+    select count(*) into v_have from public.blocks b join public.lesson_parts p on p.id = b.lesson_part_id where p.lesson_id = p_lesson;
+    if v_have = 0 then
+      raise exception 'lesson has no blocks' using errcode = '22023';
+    end if;
+    if p_checked is null or jsonb_typeof(p_checked) <> 'object' then
+      raise exception 'publish needs the checked block tokens' using errcode = '22023';
+    end if;
+    select count(*) into v_bad
+      from public.blocks b join public.lesson_parts p on p.id = b.lesson_part_id
+     where p.lesson_id = p_lesson
+       and (not (p_checked ? b.id::text) or (p_checked ->> b.id::text)::timestamptz is distinct from b.updated_at);
+    if v_bad > 0 or (select count(*) from jsonb_object_keys(p_checked)) <> v_have then
+      raise exception 'lesson changed since it was checked' using errcode = '40001';
+    end if;
+    if exists (
+         select 1 from public.blocks b join public.lesson_parts p on p.id = b.lesson_part_id
+         join public.exercises e on e.block_id = b.id
+         where p.lesson_id = p_lesson
+           and (exists (select 1 from public.test_items ti where ti.exercise_id = e.id)
+                or (e.type <> 'speaking' and not exists (select 1 from public.exercise_keys k where k.exercise_id = e.id)))
+       ) then
+      raise exception 'exercise is a test item or has no answer key' using errcode = '23514';
+    end if;
   end if;
   update public.blocks b
      set published = p_published
@@ -423,7 +477,18 @@ begin
 end
 $$;
 
+-- Exercises (of those given) that students already answered; used by the editor to lock their type.
+create function public.exercises_with_student_data(p_ids uuid[]) returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select e.id from public.exercises e
+   where e.id = any (p_ids)
+     and (exists (select 1 from public.attempts a where a.exercise_id = e.id)
+          or exists (select 1 from public.submissions s where s.exercise_id = e.id))
+$$;
+
 -- words ----------------------------------------------------------------------
+-- NOTE (review M7): words belong to the COURSE and are shared by every lesson that links them, so
+-- editing a word in one lesson changes it everywhere.
 -- p_rows: [{ru, stress, uz, pos, gender, example_ru, example_uz}]. A row whose (ru, uz) already
 -- exists in the course (case-insensitive) reuses that word. Returns counts.
 create function public.editor_import_words(p_actor uuid, p_lesson uuid, p_rows jsonb)
@@ -533,7 +598,7 @@ revoke execute on function
   public.editor_create_block(uuid, uuid, public.block_type, jsonb, jsonb),
   public.editor_save_block(uuid, uuid, jsonb, jsonb, text),
   public.editor_delete_block(uuid, uuid), public.editor_reorder_blocks(uuid, uuid, uuid[]),
-  public.editor_set_lesson_published(uuid, uuid, boolean),
+  public.editor_set_lesson_published(uuid, uuid, boolean, jsonb), public.exercises_with_student_data(uuid[]),
   public.editor_import_words(uuid, uuid, jsonb), public.editor_save_word(uuid, uuid, uuid, jsonb),
   public.editor_unlink_word(uuid, uuid, uuid)
   from public, anon, authenticated;
@@ -544,7 +609,7 @@ grant execute on function
   public.editor_create_block(uuid, uuid, public.block_type, jsonb, jsonb),
   public.editor_save_block(uuid, uuid, jsonb, jsonb, text),
   public.editor_delete_block(uuid, uuid), public.editor_reorder_blocks(uuid, uuid, uuid[]),
-  public.editor_set_lesson_published(uuid, uuid, boolean),
+  public.editor_set_lesson_published(uuid, uuid, boolean, jsonb), public.exercises_with_student_data(uuid[]),
   public.editor_import_words(uuid, uuid, jsonb), public.editor_save_word(uuid, uuid, uuid, jsonb),
   public.editor_unlink_word(uuid, uuid, uuid)
   to service_role;

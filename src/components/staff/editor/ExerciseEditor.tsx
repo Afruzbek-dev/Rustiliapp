@@ -5,6 +5,7 @@ import { AlertTriangle, Plus, Trash2 } from "lucide-react";
 import { Button, IconButton } from "@/components/ui";
 import {
   ANSWER_SEPARATOR,
+  newPair,
   draftFromModel,
   emptyModel,
   genId,
@@ -25,9 +26,11 @@ export interface ExerciseEditorProps {
   onChange: (draft: ExerciseInput) => void;
   /** The exercise is also an item of a test (reusing a lesson exercise as a test item is warned about). */
   isTestItem: boolean;
+  /** Students already answered it: the type cannot change. */
+  typeLocked?: boolean;
 }
 
-export function ExerciseEditor({ draft, onChange, isTestItem }: ExerciseEditorProps) {
+export function ExerciseEditor({ draft, onChange, isTestItem, typeLocked = false }: ExerciseEditorProps) {
   const type = (isAuthorableType(draft.type) ? draft.type : "classify") as AuthorableType;
   const [model, setModel] = useState<unknown>(() =>
     draft.payload && Object.keys(draft.payload as object).length > 0 ? modelFromDraft(type, draft.payload, draft.key) : emptyModel(type),
@@ -60,12 +63,13 @@ export function ExerciseEditor({ draft, onChange, isTestItem }: ExerciseEditorPr
         </p>
       )}
 
-      <Field label="Mashq turi" hint="Tur o'zgarsa, savollar tozalanadi">
+      <Field label="Mashq turi" hint={typeLocked ? "O'quvchilar bu mashqni bajargan: turini o'zgartirib bo'lmaydi" : "Tur o'zgarsa, savollar tozalanadi"}>
         {(id) => (
           <select
             id={id}
             className={inputClass}
             value={unsupportedType ? "" : type}
+            disabled={typeLocked}
             onChange={(e) => {
               const t = e.target.value as AuthorableType;
               const m = emptyModel(t);
@@ -257,7 +261,7 @@ function MatchForm({ m, set }: { m: MatchModel; set: (m: MatchModel) => void }) 
           {m.pairs.length > 2 && <Remove label={`${i + 1}-juftlikni o'chirish`} onClick={() => set({ pairs: m.pairs.filter((x) => x.id !== p.id) })} />}
         </div>
       ))}
-      {m.pairs.length < 30 && <AddButton onClick={() => set({ pairs: [...m.pairs, { id: genId(), left: "", right: "" }] })}>Juftlik qo&apos;shish</AddButton>}
+      {m.pairs.length < 30 && <AddButton onClick={() => set({ pairs: [...m.pairs, newPair()] })}>Juftlik qo&apos;shish</AddButton>}
     </fieldset>
   );
 }

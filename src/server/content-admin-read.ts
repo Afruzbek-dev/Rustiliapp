@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { BLOCK_TYPES, type BlockType } from "@/lib/blocks/types";
 import { lessonStatus, type EditorBlock, type EditorData, type EditorExercise, type EditorPart, type LessonStatus, type TreeModule } from "@/lib/editor/types";
+import { createServiceClient } from "@/lib/supabase/service";
 import { toEditorWord } from "@/server/content-admin";
 
 /**
@@ -95,11 +96,21 @@ export async function loadEditorData(sb: SupabaseClient, lessonId: string): Prom
     "words",
   ) ?? [];
 
+  // Exercises students already answered (type is locked). The server enforces it too; a failure here only hides the hint.
+  let locked = new Set<string>();
+  if (exIds.length > 0) {
+    try {
+      const { data: l } = await createServiceClient().rpc("exercises_with_student_data", { p_ids: exIds });
+      locked = new Set((l ?? []) as string[]);
+    } catch {
+      locked = new Set();
+    }
+  }
   const keyOf = new Map(keyRows.map((k) => [k.exercise_id, k.answer]));
   const testSet = new Set(testRows.map((t) => t.exercise_id));
   const exerciseOf = (blockId: string): EditorExercise | null => {
     const e = exRows.find((x) => x.block_id === blockId);
-    return e ? { id: e.id, type: e.type, prompt: e.prompt ?? "", payload: e.payload, key: keyOf.get(e.id) ?? null, xp: e.xp, isTestItem: testSet.has(e.id) } : null;
+    return e ? { id: e.id, type: e.type, prompt: e.prompt ?? "", payload: e.payload, key: keyOf.get(e.id) ?? null, xp: e.xp, isTestItem: testSet.has(e.id), typeLocked: locked.has(e.id) } : null;
   };
   const parts: EditorPart[] = partRows.map((p) => ({
     id: p.id,

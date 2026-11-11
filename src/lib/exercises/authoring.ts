@@ -84,6 +84,7 @@ export function checkAutoExercise(type: string, payload: unknown, key: unknown):
       const bucketIds = new Set(buckets.map((b) => b.id));
       for (const i of items) {
         if (!has(k, i.id) || typeof k[i.id] !== "string" || !bucketIds.has(k[i.id] as string)) errors.push(`«${i.text}» uchun guruh tanlanmagan`);
+        else if (i.id.includes(k[i.id] as string)) errors.push("Element identifikatori guruh identifikatoridan hosil qilinmasligi kerak");
       }
       if (Object.keys(k).some((id) => !items.some((i) => i.id === id))) errors.push("Kalitda ortiqcha element bor");
       break;
@@ -134,7 +135,11 @@ export function checkAutoExercise(type: string, payload: unknown, key: unknown):
         const r = k[l.id];
         if (typeof r !== "string" || !rightIds.has(r)) errors.push(`«${l.text}» uchun juftlik tanlanmagan`);
         else if (used.has(r)) errors.push("Bir o'ng element ikki marta ishlatilgan");
-        else used.add(r);
+        else {
+          used.add(r);
+          // the right id is visible to students: it must not encode / contain the matching left id
+          if (r === l.id || r.includes(l.id) || l.id.includes(r)) errors.push("O'ng identifikator chap identifikatordan hosil qilinmasligi kerak");
+        }
       }
       if (Object.keys(k).some((id) => !left.some((l) => l.id === id))) errors.push("Kalitda ortiqcha element bor");
       break;

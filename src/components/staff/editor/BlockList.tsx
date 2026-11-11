@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, FileText, GripVertical, Headphones, Image as ImageIcon, Languages, ListChecks, Mic, Plus, Video } from "lucide-react";
 import { Button, Chip } from "@/components/ui";
 import { cn } from "@/components/ui/cn";
@@ -41,6 +41,17 @@ export function BlockList({ blocks, selectedId, onSelect, onReorder, onAdd, addi
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
   const ids = blocks.map((b) => b.id);
+  const root = useRef<HTMLOListElement>(null);
+  const refocus = useRef<{ id: string; dir: "up" | "down" } | null>(null);
+  const [announce, setAnnounce] = useState("");
+
+  // After a move the DOM node is re-inserted: put keyboard focus back on the SAME button.
+  useEffect(() => {
+    const f = refocus.current;
+    if (!f) return;
+    refocus.current = null;
+    root.current?.querySelector<HTMLButtonElement>(`[data-move="${f.dir}"][data-block="${f.id}"]`)?.focus();
+  }, [blocks]);
 
   const moveTo = (id: string, to: number) => {
     const from = ids.indexOf(id);
@@ -48,6 +59,9 @@ export function BlockList({ blocks, selectedId, onSelect, onReorder, onAdd, addi
     const next = [...ids];
     next.splice(from, 1);
     next.splice(to, 0, id);
+    refocus.current = { id, dir: to > from ? "down" : "up" };
+    const b = blocks.find((x) => x.id === id);
+    setAnnounce(`${b ? blockTitle(b) : "Blok"}: ${to + 1}-o'rinda, jami ${ids.length} ta`);
     onReorder(next);
   };
 
@@ -55,7 +69,8 @@ export function BlockList({ blocks, selectedId, onSelect, onReorder, onAdd, addi
     <div className="flex flex-col gap-2">
       <span className="text-sm font-bold text-ink-2">Bloklar ketma-ketligi: o&apos;quvchi shu tartibda o&apos;tadi</span>
       {blocks.length === 0 && <p className="rounded-[var(--radius-md)] border-2 border-dashed border-border-strong p-4 text-ink-2">Hali blok yo&apos;q. Quyidan birinchi blokni qo&apos;shing.</p>}
-      <ol className="flex flex-col gap-2" aria-label="Bloklar">
+      <p role="status" aria-live="polite" className="sr-only">{announce}</p>
+      <ol ref={root} className="flex flex-col gap-2" aria-label="Bloklar">
         {blocks.map((b, i) => {
           const Icon = ICON[b.type] ?? FileText;
           const selected = b.id === selectedId;
@@ -118,18 +133,22 @@ export function BlockList({ blocks, selectedId, onSelect, onReorder, onAdd, addi
               <button
                 type="button"
                 aria-label={`${i + 1}-blokni yuqoriga ko'chirish`}
-                disabled={i === 0}
-                onClick={() => moveTo(b.id, i - 1)}
-                className="inline-flex size-11 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-ink-2 disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-info-strong"
+                data-move="up"
+                data-block={b.id}
+                aria-disabled={i === 0}
+                onClick={() => i > 0 && moveTo(b.id, i - 1)}
+                className={cn("inline-flex size-11 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-ink-2 focus-visible:outline-2 focus-visible:outline-info-strong", i === 0 && "opacity-30")}
               >
                 <ArrowUp className="size-5" aria-hidden="true" />
               </button>
               <button
                 type="button"
                 aria-label={`${i + 1}-blokni pastga ko'chirish`}
-                disabled={i === blocks.length - 1}
-                onClick={() => moveTo(b.id, i + 1)}
-                className="inline-flex size-11 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-ink-2 disabled:opacity-30 focus-visible:outline-2 focus-visible:outline-info-strong"
+                data-move="down"
+                data-block={b.id}
+                aria-disabled={i === blocks.length - 1}
+                onClick={() => i < blocks.length - 1 && moveTo(b.id, i + 1)}
+                className={cn("inline-flex size-11 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-ink-2 focus-visible:outline-2 focus-visible:outline-info-strong", i === blocks.length - 1 && "opacity-30")}
               >
                 <ArrowDown className="size-5" aria-hidden="true" />
               </button>

@@ -74,7 +74,7 @@ describe("block list and reordering", () => {
     const user = userEvent.setup();
     const list = screen.getByRole("list", { name: "Bloklar" });
     expect(within(list).getAllByRole("listitem")).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "1-blokni yuqoriga ko'chirish" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "1-blokni yuqoriga ko'chirish" })).toHaveAttribute("aria-disabled", "true");
     await user.click(screen.getByRole("button", { name: "1-blokni pastga ko'chirish" }));
     expect(actions.reorderBlocks).toHaveBeenCalledWith({ partId: P1, ids: [B2, B1] });
     const titles = within(list).getAllByRole("listitem").map((li) => li.textContent);

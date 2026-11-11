@@ -66,6 +66,9 @@ describe('0015 teacher statistics', () => {
       `insert into public.lesson_parts (lesson_id, position, kind, title) values ($1, 1, 'grammar', 'Grammatika 2') returning id`,
       [lesson2],
     );
+    // every part is playable (has a published block); lesson_completion ignores the others
+    await createBlock(lesson.part1, 1, true);
+    await createBlock(p21.id, 1, true);
     const block = await createBlock(lesson.part2, 1, true, 'speaking');
     exercise = await createExercise(block, { type: 'speaking', checkMode: 'review', answer: {} });
 
@@ -189,6 +192,31 @@ describe('0015 teacher statistics', () => {
     });
   });
 
+  describe('lesson_completion: playable parts only', () => {
+    it('ignores unpublished parts and skips lessons without a playable part', async () => {
+      const x = await createCourseWorld();
+      const a = await createLesson(x.course); // part1 published, part2 only an unpublished block
+      await createBlock(a.part1, 1, true);
+      await createBlock(a.part2, 1, false);
+      const [lb] = await sql<{ id: string }>(
+        `insert into public.lessons (module_id, position, title) values ($1, 2, 'Dars B') returning id`,
+        [a.module],
+      );
+      const [pb] = await sql<{ id: string }>(
+        `insert into public.lesson_parts (lesson_id, position, kind, title) values ($1, 1, 'grammar', 'B1') returning id`,
+        [lb.id],
+      );
+      await createBlock(pb.id, 1, false);
+      const stu = await createActiveStudent(x.cohort, x.group, 'Playable');
+      for (const part of [a.part1, pb.id]) {
+        await sql(`insert into public.part_progress (student_id, lesson_part_id, status, completed_at) values ($1, $2, 'completed', now())`, [stu, part]);
+      }
+      const rows = await withUser(x.teacher, (q) => q('select * from public.lesson_completion($1)', [x.cohort]));
+      // Dars 1: finishing the one playable part is enough; Dars B has nothing playable
+      expect(rows.map((r) => [r.title, r.completed_students])).toEqual([['Dars 1', 1], ['Dars B', 0]]);
+    });
+  });
+
   describe('curator_stats', () => {
     it('queue, effective scores and response time', async () => {
       const second = await createGroup(w.cohort, null);
@@ -221,6 +249,19 @@ describe('0015 teacher statistics', () => {
       expect(rows[0].telegram_linked).toBe(false);
       expect(rows[0].last_part_title).toBe('Grammatika'); // s3's only (in-progress) part
       expect(rows[1].last_part_title).toBe('Grammatika');
+    });
+
+    it("last_part_title only looks at parts of the cohort's own course", async () => {
+      const x = await createCourseWorld();
+      const mine = await createLesson(x.course);
+      const foreign = await createLesson(other.course);
+      await sql(`update public.lesson_parts set title = 'Mening qismim' where id = $1`, [mine.part1]);
+      await sql(`update public.lesson_parts set title = 'Begona qism' where id = $1`, [foreign.part1]);
+      const stu = await createActiveStudent(x.cohort, x.group, 'Ikki Kurs');
+      await sql(`insert into public.part_progress (student_id, lesson_part_id, status, started_at) values ($1, $2, 'in_progress', now() - interval '2 days')`, [stu, mine.part1]);
+      await sql(`insert into public.part_progress (student_id, lesson_part_id, status, started_at) values ($1, $2, 'in_progress', now())`, [stu, foreign.part1]);
+      const rows = await withUser(x.teacher, (q) => q('select last_part_title from public.idle_students($1, 3)', [x.cohort]));
+      expect(rows.map((r) => r.last_part_title)).toEqual(['Mening qismim']);
     });
 
     it('the window counts today: p_days = 3 keeps a student active 2 days ago, p_days = 2 drops them', async () => {

@@ -52,6 +52,16 @@ export function ReviewCard({ item, nowIso, mode, busy, focusOnMount, canSkip, on
     if (focusOnMount) heading.current?.focus();
   }, [focusOnMount]);
 
+  // A control that had focus may be disabled while the request runs; once it ends, never leave focus on <body>.
+  const wasBusy = useRef(false);
+  useEffect(() => {
+    if (wasBusy.current && !busy) {
+      const active = document.activeElement;
+      if (!active || active === document.body) heading.current?.focus();
+    }
+    wasBusy.current = busy;
+  }, [busy]);
+
   const complete = CRITERIA.every((c) => draft[c] !== undefined);
   const avg = complete ? averageOf(draft as Scores) : null;
   const locked = busy || mode === "readonly";
@@ -170,7 +180,8 @@ export function ReviewCard({ item, nowIso, mode, busy, focusOnMount, canSkip, on
                 value={comment}
                 maxLength={MAX_COMMENT}
                 rows={3}
-                disabled={busy}
+                readOnly={busy}
+                aria-busy={busy || undefined}
                 onChange={(e) => setComment(e.target.value)}
                 className="w-full resize-y rounded-[var(--radius-sm)] border-2 border-border-strong bg-card p-3 text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-info-strong"
               />

@@ -34,6 +34,13 @@ describe("ActivityChart", () => {
     expect(screen.queryByRole("tooltip")).toBeNull();
   });
 
+  it("the y-axis tick column is offset like the plot area, so ticks sit on the gridlines", () => {
+    const { container } = render(<ActivityChart data={days} />);
+    const ticks = container.querySelector("div.h-44.flex-col")!;
+    expect(ticks.className).toContain("mt-10");
+    expect(ticks.className).not.toContain("pt-10");
+  });
+
   it("offers the same numbers as a table inside <details>", () => {
     const { container } = render(<ActivityChart data={days} />);
     const details = container.querySelector("details")!;
@@ -112,6 +119,18 @@ describe("RequestsCard", () => {
     await userEvent.click(screen.getByRole("button", { name: "Rad etish" }));
     expect(await screen.findByText("Rad etildi")).toBeInTheDocument();
     expect(reject).toHaveBeenCalledTimes(1);
+  });
+
+  it("a successful reject after a failed approve shows the reject result and settles the row", async () => {
+    const approve: StaffAction = async () => ({ status: "error", message: "Xatolik yuz berdi" });
+    const reject: StaffAction = async () => ({ status: "success", message: "Rad etildi" });
+    render(<RequestsCard requests={[req("e1")]} approveAction={approve} rejectAction={reject} />);
+    await userEvent.click(screen.getByRole("button", { name: "Ruxsat" }));
+    expect(await screen.findByText("Xatolik yuz berdi")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Rad etish" }));
+    expect(await screen.findByText("Rad etildi")).toBeInTheDocument();
+    expect(screen.queryByText("Xatolik yuz berdi")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rad etish" })).toBeNull();
   });
 });
 

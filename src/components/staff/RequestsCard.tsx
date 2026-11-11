@@ -53,9 +53,25 @@ function RequestRow({
   rejectAction: StaffAction;
   onSettled: (request: RequestItem, state: ActionState) => void;
 }) {
-  const [approved, approveForm, approving] = useActionState(approveAction, IDLE);
-  const [rejected, rejectForm, rejecting] = useActionState(rejectAction, IDLE);
-  const state = rejected.status !== "idle" && approved.status === "idle" ? rejected : approved.status !== "idle" ? approved : IDLE;
+  // Whichever action finished LAST decides what the row shows (a failed approve followed by a
+  // successful reject must end in "Rad etildi"), so both results flow into one state.
+  const [state, setState] = useState<ActionState>(IDLE);
+  const [, approveForm, approving] = useActionState(
+    async (prev: ActionState, fd: FormData) => {
+      const next = await approveAction(prev, fd);
+      setState(next);
+      return next;
+    },
+    IDLE,
+  );
+  const [, rejectForm, rejecting] = useActionState(
+    async (prev: ActionState, fd: FormData) => {
+      const next = await rejectAction(prev, fd);
+      setState(next);
+      return next;
+    },
+    IDLE,
+  );
   const done = state.status === "success" || state.status === "info";
 
   useEffect(() => {

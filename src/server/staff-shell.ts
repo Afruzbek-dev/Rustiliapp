@@ -1,6 +1,7 @@
 import "server-only";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { getQueue } from "@/server/curator-queue";
 
 export type StaffRole = "teacher" | "admin" | "curator";
 
@@ -30,19 +31,17 @@ export async function requireShellUser(): Promise<ShellUser> {
 }
 
 /**
- * Badge for "Tekshirish navbati": finished submissions still waiting for a review, as far as RLS lets
- * this user see them (a curator: their groups; a teacher: their course). A failure only hides the badge.
+ * Badge for "Tekshirish navbati": exactly the queue's own count (getQueue), so it never disagrees with
+ * the list: finished audio/video only, never the viewer's own work, never test-item exercises, as far
+ * as RLS lets this user see them. A failure only hides the badge.
+ *
+ * Canonical "unreviewed" definition = the review queue. The KPI tile (teacher_kpis) and curator_stats
+ * deliberately count per cohort / per group in SQL (finished pending submissions of active students,
+ * text included) and may differ from this per-viewer number.
  */
-export async function pendingQueueCount(): Promise<number | null> {
+export async function pendingQueueCount(userId: string): Promise<number | null> {
   try {
-    const supabase = await createClient();
-    const { count, error } = await supabase
-      .from("submissions")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "pending")
-      .or("storage_path.not.is.null,tg_file_id.not.is.null,kind.eq.text");
-    if (error) return null;
-    return count ?? 0;
+    return (await getQueue(userId)).count;
   } catch {
     return null;
   }

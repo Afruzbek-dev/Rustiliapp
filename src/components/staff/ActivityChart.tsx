@@ -41,7 +41,7 @@ export function ActivityChart({ data }: ActivityChartProps) {
   return (
     <figure className="flex flex-col gap-3">
       <div className="flex gap-2">
-        <div aria-hidden="true" className="flex h-44 flex-col justify-between pt-10 text-right text-xs text-ink-3">
+        <div aria-hidden="true" className="mt-10 flex h-44 flex-col justify-between text-right text-xs text-ink-3">
           {ticks.map((t) => (
             <span key={t} className="leading-none">
               {t}

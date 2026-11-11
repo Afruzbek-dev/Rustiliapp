@@ -132,8 +132,9 @@ export function ReviewQueue({
     <main className="mx-auto flex w-full max-w-2xl flex-col gap-4 p-4">
       <header className="flex items-center justify-between gap-3">
         <h1 className="text-2xl font-extrabold">Tekshirish navbati</h1>
-        <Chip tone="brand" aria-label={`Navbatda ${queue.length} ta topshiriq`}>
-          {queue.length}
+        <Chip tone="brand">
+          <span aria-hidden="true">{queue.length}</span>
+          <span className="sr-only">{`Navbatda ${queue.length} ta topshiriq`}</span>
         </Chip>
       </header>
 

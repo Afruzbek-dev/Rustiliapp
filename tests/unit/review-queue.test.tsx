@@ -63,7 +63,7 @@ describe("ReviewQueue", () => {
   it("shows title, count chip, current submission and the oldest first", () => {
     setup();
     expect(screen.getByRole("heading", { level: 1, name: "Tekshirish navbati" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Navbatda 2 ta topshiriq")).toHaveTextContent("2");
+    expect(screen.getByText("Navbatda 2 ta topshiriq")).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Talaba1 V.");
     expect(screen.getByText("Dars 1")).toBeInTheDocument();
     expect(screen.getByText("2 soat oldin")).toBeInTheDocument();
@@ -117,7 +117,7 @@ describe("ReviewQueue", () => {
       comment: "Yaxshi",
     });
     expect("override" in body).toBe(false);
-    expect(screen.getByLabelText("Navbatda 1 ta topshiriq")).toBeInTheDocument();
+    expect(screen.getByText("Navbatda 1 ta topshiriq")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Baho yuborildi");
     expect(screen.getByRole("heading", { level: 2 })).toHaveFocus();
     // the form of the next item starts empty
@@ -177,13 +177,33 @@ describe("ReviewQueue", () => {
     expect(reviewCalls(fetchFn)).toHaveLength(2);
   });
 
+  it("focus is never lost to <body>: score buttons stay focusable while busy and a failed submit returns focus to the card", async () => {
+    const user = userEvent.setup();
+    let release: (r: Response) => void = () => undefined;
+    mockFetch(() => new Promise<Response>((res) => (release = res)));
+    setup();
+    await rate(user, ALL);
+    const score = screen.getByRole("button", { name: "Talaffuz: 4" });
+    score.focus();
+    await user.keyboard("{Enter}"); // submits the finished form from a score button
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Baholash/ })).toHaveAttribute("aria-busy", "true"));
+    expect(score).not.toBeDisabled();
+    expect(score).toHaveAttribute("aria-disabled", "true");
+    expect(document.activeElement).toBe(score);
+    await user.click(screen.getByRole("button", { name: "Talaffuz: 2" })); // ignored while busy
+    expect(score).toHaveAttribute("aria-pressed", "true");
+    release(json(500, { error: "internal_error" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/Qayta urinib/));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
   it("skip moves to the next item without a server call and keeps it in the queue", async () => {
     const user = userEvent.setup();
     const fetchFn = mockFetch(() => json(200, {}));
     setup();
     await user.click(screen.getByRole("button", { name: "O'tkazish" }));
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Talaba2 V.");
-    expect(screen.getByLabelText("Navbatda 2 ta topshiriq")).toBeInTheDocument();
+    expect(screen.getByText("Navbatda 2 ta topshiriq")).toBeInTheDocument();
     expect(reviewCalls(fetchFn)).toHaveLength(0);
     await user.click(screen.getByRole("button", { name: "O'tkazish" }));
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Talaba1 V.");
@@ -268,7 +288,7 @@ describe("ReviewQueue states", () => {
   it("empty queue shows the empty state", () => {
     setup({ initialItems: [] });
     expect(screen.getByText("Navbat bo'sh — hammasi baholangan")).toBeInTheDocument();
-    expect(screen.getByLabelText("Navbatda 0 ta topshiriq")).toBeInTheDocument();
+    expect(screen.getByText("Navbatda 0 ta topshiriq")).toBeInTheDocument();
   });
 
   it("becomes empty after the last review", async () => {

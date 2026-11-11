@@ -15,6 +15,9 @@ export interface RubricRowProps {
 const SCORES = [1, 2, 3, 4, 5] as const;
 
 /**
+ * While `disabled` the buttons stay focusable (aria-disabled, clicks ignored): a native disabled
+ * attribute would drop focus to <body> in the middle of a keyboard session.
+ *
  * One criterion with five real buttons (aria-label "Talaffuz: 4"). Roving tabindex: Tab moves to the
  * next criterion, Left/Right move between the five buttons without changing the score.
  */
@@ -47,11 +50,13 @@ export function RubricRow({ label, value, disabled, onChange, onFocusRow, rowInd
               data-score={n}
               aria-label={`${label}: ${n}`}
               aria-pressed={selected}
-              disabled={disabled}
+              aria-disabled={disabled || undefined}
               tabIndex={n === tabStop ? 0 : -1}
-              onClick={() => onChange(n)}
+              onClick={() => {
+                if (!disabled) onChange(n);
+              }}
               onKeyDown={(e) => onKeyDown(e, n)}
-              className={`min-h-10 min-w-10 rounded-[var(--radius-sm)] border-2 text-base font-extrabold transition-colors motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-info-strong disabled:opacity-60 ${
+              className={`min-h-10 min-w-10 rounded-[var(--radius-sm)] border-2 text-base font-extrabold transition-colors motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-info-strong aria-disabled:opacity-60 ${
                 selected ? "border-brand-shadow bg-brand text-ink" : "border-border-strong bg-card text-ink"
               }`}
             >

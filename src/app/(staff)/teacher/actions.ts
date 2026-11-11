@@ -3,6 +3,8 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { createServiceClient } from "@/lib/supabase/service";
+import { getTelegramApi } from "@/lib/telegram/api-client";
+import { ENR_MSG } from "@/lib/telegram/handlers/enrollment";
 import { approveEnrollment, rejectEnrollment } from "@/server/enrollment";
 import { requireStaff } from "@/server/guards";
 import { appHomeUrl, productionReminderDeps, remindStudent } from "@/server/teacher-reminders";
@@ -19,6 +21,15 @@ const reminderSchema = z.object({ studentId: z.string().uuid(), cohortId: z.stri
 
 const INVALID: ActionState = { status: "error", message: "Noto'g'ri so'rov" };
 
+/** Best-effort: the approval is already committed, so a failed DM is logged (code only) and ignored. */
+async function notifyOpened(telegramId: number): Promise<void> {
+  try {
+    await getTelegramApi().sendMessage(telegramId, ENR_MSG.opened);
+  } catch (err) {
+    console.error("approve notify failed", { code: err instanceof Error ? err.name : "unknown" });
+  }
+}
+
 /**
  * Every action re-derives the actor from the VERIFIED session (requireStaff redirects anonymous
  * users and non-staff) and never from the form; the form only names the row. Authority over that
@@ -31,6 +42,10 @@ export async function approveRequestAction(_prev: ActionState, formData: FormDat
   try {
     const res = await approveEnrollment(createServiceClient(), parsed.data.enrollmentId, user.id);
     revalidatePath("/teacher");
+    // Same DM the staff-chat button sends; only on the transition itself (a repeat approves nothing).
+    if (res.outcome === "approved" && res.studentTelegramId !== null) {
+      await notifyOpened(res.studentTelegramId);
+    }
     return approveState(res);
   } catch (err) {
     return failureState(err);

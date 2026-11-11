@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export default async function StaffLayout({ children }: { children: ReactNode }) {
   const user = await requireShellUser();
-  const pending = await pendingQueueCount();
+  const pending = await pendingQueueCount(user.id);
   return (
     <div className="flex min-h-dvh flex-wrap">
       <Sidebar role={user.role} name={user.name} pending={pending} />

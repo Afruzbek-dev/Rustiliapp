@@ -39,6 +39,8 @@ export async function requireCurator() {
 
 export async function requireStaff() {
   const { user, role } = await currentUserAndRole();
+  // A curator who opens /teacher belongs in their own area, not on the student home.
+  if (role === "curator") redirect("/curator");
   if (role !== "teacher" && role !== "admin") redirect("/home");
   return { user, role };
 }

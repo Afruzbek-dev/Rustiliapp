@@ -66,8 +66,8 @@ export default async function PathPage() {
                 kind="test"
                 title="Test"
                 subtitle={m.test.title}
-                status={m.test.status === "available" ? "available" : "locked"}
-                href={m.test.status === "available" ? `/test/${m.test.id}` : undefined}
+                status={m.test.status}
+                href={m.test.status === "locked" ? undefined : `/test/${m.test.id}`}
                 offset={ZIGZAG_OFFSETS[n++ % ZIGZAG_OFFSETS.length]}
                 lockedMessage="Avval modul darslarini tugating"
               />

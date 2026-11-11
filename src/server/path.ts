@@ -35,7 +35,8 @@ export interface PathLesson {
 export interface PathTest {
   id: string;
   title: string;
-  status: "locked" | "available";
+  /** completed = the student passed it; the node then leads to the result screen. */
+  status: "locked" | "available" | "completed";
 }
 
 export interface PathModule {
@@ -79,6 +80,8 @@ export interface PathDb {
   progress(studentId: string): Promise<Map<string, PartProgress>>;
   /** Tests of the course (RLS already hides unpublished ones; `published` is re-checked). */
   tests(courseId: string): Promise<TestRow[]>;
+  /** Ids of tests the student passed (optional: a port without it shows no test as completed). */
+  passedTestIds?(studentId: string): Promise<Set<string>>;
 }
 
 export async function getPathWith(db: PathDb, studentId: string, now: Date = new Date()): Promise<Path> {
@@ -89,10 +92,11 @@ export async function getPathWith(db: PathDb, studentId: string, now: Date = new
   const allPartIds = rawModules.flatMap((m) =>
     (m.lessons ?? []).flatMap((l) => (l.lesson_parts ?? []).map((p) => p.id)),
   );
-  const [published, progress, tests] = await Promise.all([
+  const [published, progress, tests, passedTests] = await Promise.all([
     allPartIds.length > 0 ? db.publishedPartIds(allPartIds) : Promise.resolve(new Set<string>()),
     db.progress(studentId),
     db.tests(enrollment.courseId),
+    db.passedTestIds ? db.passedTestIds(studentId) : Promise.resolve(new Set<string>()),
   ]);
 
   // One global, ordered sequence of published parts across the whole course.
@@ -141,7 +145,11 @@ export async function getPathWith(db: PathDb, studentId: string, now: Date = new
       lessons,
       completedLessons: lessons.filter((l) => l.status === "completed").length,
       test: test
-        ? { id: test.id, title: test.title, status: moduleTestStatus(lessons.map((l) => l.status)) }
+        ? {
+            id: test.id,
+            title: test.title,
+            status: passedTests.has(test.id) ? "completed" : moduleTestStatus(lessons.map((l) => l.status)),
+          }
         : null,
     };
   });
@@ -187,6 +195,14 @@ export function supabasePathDb(sb: Sb): PathDb {
         "part progress",
       );
       return new Map((data ?? []).map((r) => [r.lesson_part_id, r.status]));
+    },
+
+    async passedTestIds(studentId) {
+      const data = ok<{ test_id: string }[] | null>(
+        await sb.from("test_attempts").select("test_id").eq("student_id", studentId).eq("passed", true),
+        "passed tests",
+      );
+      return new Set((data ?? []).map((r) => r.test_id));
     },
 
     async tests(courseId) {

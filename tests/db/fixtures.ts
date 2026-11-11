@@ -31,7 +31,7 @@ export async function createCohort(courseId: string, name = 'Potok 1'): Promise<
 export async function createGroup(cohortId: string, curatorId: string | null): Promise<string> {
   const [row] = await sql<{ id: string }>(
     'insert into public.curator_groups (cohort_id, curator_id, name) values ($1, $2, $3) returning id',
-    [cohortId, curatorId, 'Guruh'],
+    [cohortId, curatorId, `Guruh ${randomUUID().slice(0, 8)}`], // names are unique per cohort (0017)
   );
   return row.id;
 }

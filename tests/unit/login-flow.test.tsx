@@ -162,6 +162,44 @@ describe("LoginFlow", () => {
     expect(verifyOtp).not.toHaveBeenCalled();
   });
 
+  it("a failed verifyOtp goes straight to the restart state (nonce is consumed)", async () => {
+    statusAnswers = [{ status: 200, body: { status: "confirmed", identity: ID } }];
+    verifyOtp.mockResolvedValue({ error: { message: "bad" } });
+    const navigate = vi.fn();
+    render(<LoginFlow navigate={navigate} />);
+    await flush();
+    await tick();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Ha, kirish" }));
+    });
+    await flush();
+    expect(screen.getByRole("heading", { name: "Havola muddati tugadi" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Ha, kirish" })).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("'Yo'q, bekor qilish' also calls /cancel with the nonce", async () => {
+    statusAnswers = [{ status: 200, body: { status: "confirmed", identity: ID } }];
+    render(<LoginFlow navigate={vi.fn()} />);
+    await flush();
+    await tick();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Yo'q, bekor qilish" }));
+    });
+    await flush();
+    const call = fetchMock.mock.calls.find((c) => String(c[0]).endsWith("/cancel"))!;
+    expect(JSON.parse((call[1] as RequestInit).body as string)).toEqual({ nonce: NONCE });
+  });
+
+  it("the live region announces the opened step", async () => {
+    render(<LoginFlow navigate={vi.fn()} />);
+    await flush();
+    const live = screen.getByRole("status");
+    expect(live).toHaveTextContent(/Botni oching/);
+    fireEvent.click(screen.getByRole("link", { name: /Telegram'ni ochish/ }));
+    expect(live).toHaveTextContent(/Telefon raqamni ulashing/);
+  });
+
   it("exchange 410 -> expired state", async () => {
     statusAnswers = [{ status: 200, body: { status: "confirmed", identity: ID } }];
     exchange = { status: 410, body: { error: "expired" } };

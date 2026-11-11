@@ -1,11 +1,16 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-export type LoginView = { kind: "anonymous" } | { kind: "pending" } | { kind: "redirect"; to: string };
+export type LoginView =
+  | { kind: "anonymous" }
+  | { kind: "pending" }
+  /** Enrollment was rejected or has expired and nothing is awaiting approval. */
+  | { kind: "closed" }
+  | { kind: "redirect"; to: string };
 
 /**
  * What /login should show for the current session. Mirrors requireStudent exactly so the two
  * can never bounce a user between each other: a student WITHOUT an active, unexpired enrollment
- * (requireStudent sends them here) gets the pending view and is never redirected to /home.
+ * (requireStudent sends them here) is never redirected to /home.
  */
 export async function resolveLoginView(supabase: SupabaseClient): Promise<LoginView> {
   const { data } = await supabase.auth.getUser();
@@ -15,13 +20,17 @@ export async function resolveLoginView(supabase: SupabaseClient): Promise<LoginV
   // requireStudent sends profile-less users to /login: they must see the login steps, not /home.
   if (!profile) return { kind: "anonymous" };
   if (profile.role !== "student") return { kind: "redirect", to: "/home" };
-  const nowIso = new Date().toISOString();
-  const { data: enr } = await supabase
+
+  const { data: rows } = await supabase
     .from("enrollments")
-    .select("id")
-    .eq("student_id", user.id)
-    .eq("status", "active")
-    .or(`expires_at.is.null,expires_at.gt.${nowIso}`)
-    .limit(1);
-  return enr && enr.length > 0 ? { kind: "redirect", to: "/home" } : { kind: "pending" };
+    .select("status, expires_at")
+    .eq("student_id", user.id);
+  const list = (rows ?? []) as { status: string; expires_at: string | null }[];
+  const now = Date.now();
+  const live = (e: { expires_at: string | null }) => e.expires_at === null || Date.parse(e.expires_at) > now;
+  if (list.some((e) => e.status === "active" && live(e))) return { kind: "redirect", to: "/home" };
+  if (list.some((e) => e.status === "pending")) return { kind: "pending" };
+  // No enrollment at all counts as pending (the bot creates one on contact verification);
+  // rejected / expired ones with nothing pending are closed.
+  return list.length > 0 ? { kind: "closed" } : { kind: "pending" };
 }

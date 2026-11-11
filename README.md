@@ -76,6 +76,9 @@ CI (`.github/workflows/ci.yml`) runs lint, typecheck, unit tests, DB tests and t
 - **Testing:** Vercel Hobby works. Set all environment variables in the project settings, deploy, then set the webhook.
 - **Real cohorts:** Vercel's free (Hobby) tier is not permitted for commercial use. Use a paid Vercel plan or another
   compatible Node host before running paid courses.
+- **Rate limit (required):** add a platform rate limit on `POST /api/auth/telegram/start` (e.g. a Vercel Firewall
+  rate-limit rule, about 10 requests/min/IP). The app deliberately has no in-memory limiter (meaningless on
+  serverless); `/start` is unauthenticated and creates a database row per call.
 - **GitHub Actions secrets:** `SUPABASE_URL` and `SUPABASE_ANON_KEY` (daily keepalive,
   `.github/workflows/keepalive.yml`, prevents free-tier pausing), `SUPABASE_DB_URL` (weekly `pg_dump` backup,
   `.github/workflows/backup.yml`, stored as a private workflow artifact for 90 days).

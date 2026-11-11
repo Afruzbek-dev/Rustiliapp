@@ -38,6 +38,20 @@ describe("/login page", () => {
     expect(screen.getByText(/ustozingizga Telegram orqali yozing/)).toBeInTheDocument();
   });
 
+  it("a rejected/expired enrollment gets the closed copy and a sign-out button, not 'waiting for approval'", async () => {
+    view.mockResolvedValue({ kind: "closed" });
+    render(await LoginPage());
+    expect(screen.getByRole("heading", { name: "Kursga kirish yopilgan, ustoz bilan bog'laning" })).toBeInTheDocument();
+    expect(screen.queryByText("Ustoz tasdig'i kutilmoqda")).toBeNull();
+    expect(screen.getByRole("button", { name: "Chiqish" })).toBeInTheDocument();
+  });
+
+  it("the pending view has a sign-out button", async () => {
+    view.mockResolvedValue({ kind: "pending" });
+    render(await LoginPage());
+    expect(screen.getByRole("button", { name: "Chiqish" })).toBeInTheDocument();
+  });
+
   it("an active student is redirected to /home", async () => {
     view.mockResolvedValue({ kind: "redirect", to: "/home" });
     await expect(LoginPage()).rejects.toMatchObject({ to: "/home" });

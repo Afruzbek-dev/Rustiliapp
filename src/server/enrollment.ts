@@ -11,7 +11,7 @@ import type { createServiceClient } from "@/lib/supabase/service";
  *   const res = await approveEnrollment(createServiceClient(), enrollmentId, session.profileId, {
  *     curatorGroupId, // optional; omitted -> the cohort's least loaded group
  *   });
- *   // res.outcome: "approved" | "already_approved"; res.groupName / res.noGroup for the UI;
+ *   // res.outcome: "approved" | "already_approved" | "cohort_closed" (nothing changed); res.groupName / res.noGroup for the UI;
  *   // throws EnrollmentError with code "forbidden" | "not_found" | "invalid_group" | "db".
  *
  * `actorProfileId` MUST come from the verified session (or the Telegram id -> profile lookup),
@@ -95,7 +95,7 @@ export async function ensurePendingEnrollment(
   const { data, error } = await db.from("cohorts").select(COHORT_COLUMNS);
   if (error) dbFail("listCohorts", error);
   const open = ((data as CohortRow[] | null) ?? [])
-    .filter((c) => c.access_until === null || new Date(c.access_until).getTime() > now.getTime())
+    .filter((c) => isCohortOpen(c, now))
     .sort(
       (a, b) =>
         (b.starts_on ?? "").localeCompare(a.starts_on ?? "") ||
@@ -131,6 +131,20 @@ export async function ensurePendingEnrollment(
   }
   const row = ((inserted as EnrollmentRow[] | null) ?? [])[0];
   if (!row) dbFail("insertPending", { code: "no_row" });
+
+  // The cohort may have closed between the read and the insert: re-check and roll the row back,
+  // so no staff message is sent for a request that can no longer be approved.
+  const { data: fresh, error: freshError } = await db
+    .from("cohorts")
+    .select(COHORT_COLUMNS)
+    .eq("id", target.id)
+    .maybeSingle();
+  if (freshError) dbFail("recheckCohort", freshError);
+  if (!fresh || !isCohortOpen(fresh as CohortRow, now)) {
+    const { error: undoError } = await db.from("enrollments").delete().eq("id", row.id).eq("status", "pending");
+    if (undoError) dbFail("rollbackPending", undoError);
+    return { created: false, reason: "no_cohort" };
+  }
   return { created: true, enrollment: row };
 }
 
@@ -189,7 +203,12 @@ async function loadContext(db: ServiceClient, enrollmentId: string, actorProfile
   return { enrollment, cohort, studentName: s?.full_name ?? "", studentTelegramId: s?.telegram_id ?? null };
 }
 
-/** Adds one calendar month to a `YYYY-MM-DD` date (clamped to the month end), at UTC midnight. */
+/** A cohort still grants access when its computed expiry (see computeExpiresAt) is in the future. */
+function isCohortOpen(c: Pick<CohortRow, "access_until" | "ends_on">, now: Date): boolean {
+  return new Date(computeExpiresAt(c, now)).getTime() > now.getTime();
+}
+
+/** Adds one calendar month to a `YYYY-MM-DD` date (clamped to the month end), at UTC midnight (= 05:00 Asia/Tashkent). */
 function plusOneMonth(date: string): Date {
   const [y, m, d] = date.split("-").map(Number) as [number, number, number];
   const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
@@ -200,7 +219,7 @@ function plusOneMonth(date: string): Date {
  * Expiry rule for an approved enrollment. It is ALWAYS a real timestamp, because a NULL
  * `expires_at` means "never expires" in the RLS helpers and must never be produced here:
  *   1. cohort.access_until, else
- *   2. cohort.ends_on + 1 month (UTC midnight), else
+ *   2. cohort.ends_on + 1 month, computed at UTC midnight (05:00 Asia/Tashkent), else
  *   3. now + 90 days.
  */
 export function computeExpiresAt(cohort: Pick<CohortRow, "access_until" | "ends_on">, now = new Date()): string {
@@ -244,11 +263,14 @@ async function pickGroup(
 }
 
 export type ApproveResult = {
-  outcome: "approved" | "already_approved";
+  /** "cohort_closed": the computed expiry is not in the future; nothing was changed. */
+  outcome: "approved" | "already_approved" | "cohort_closed";
   enrollment: EnrollmentRow;
   studentName: string;
   studentTelegramId: number | null;
   groupName: string | null;
+  /** Name of the profile that approved it (for "already_approved"; null otherwise/unknown). */
+  approvedByName: string | null;
   /** True when no curator group is assigned (the cohort has none). */
   noGroup: boolean;
 };
@@ -258,6 +280,13 @@ async function groupNameOf(db: ServiceClient, id: string | null): Promise<string
   const { data, error } = await db.from("curator_groups").select("id, name").eq("id", id).maybeSingle();
   if (error) dbFail("loadGroup", error);
   return (data as GroupRow | null)?.name ?? null;
+}
+
+async function profileNameOf(db: ServiceClient, id: string | null): Promise<string | null> {
+  if (!id) return null;
+  const { data, error } = await db.from("profiles").select("id, full_name").eq("id", id).maybeSingle();
+  if (error) dbFail("loadApprover", error);
+  return (data as { full_name: string } | null)?.full_name ?? null;
 }
 
 /**
@@ -279,9 +308,16 @@ export async function approveEnrollment(
     outcome: "already_approved",
     enrollment: e,
     groupName: await groupNameOf(db, e.curator_group_id),
+    approvedByName: await profileNameOf(db, e.approved_by),
     noGroup: e.curator_group_id === null,
   });
   if (ctx.enrollment.status === "active") return unchanged(ctx.enrollment);
+
+  const expiresAt = computeExpiresAt(ctx.cohort, now);
+  if (new Date(expiresAt).getTime() <= now.getTime()) {
+    // Never activate an enrollment that is born expired (no false "access granted").
+    return { ...base, outcome: "cohort_closed", enrollment: ctx.enrollment, groupName: null, approvedByName: null, noGroup: false };
+  }
 
   const group = await pickGroup(db, ctx.cohort.id, opts.curatorGroupId, now);
   const { data, error } = await db
@@ -290,7 +326,7 @@ export async function approveEnrollment(
       status: "active",
       approved_by: actorProfileId,
       approved_at: now.toISOString(),
-      expires_at: computeExpiresAt(ctx.cohort, now),
+      expires_at: expiresAt,
       curator_group_id: group?.id ?? null,
     })
     .eq("id", enrollmentId)
@@ -302,7 +338,7 @@ export async function approveEnrollment(
     // A concurrent approval won the race: report its result unchanged.
     return unchanged((await loadContext(db, enrollmentId, actorProfileId)).enrollment);
   }
-  return { ...base, outcome: "approved", enrollment: updated, groupName: group?.name ?? null, noGroup: group === null };
+  return { ...base, outcome: "approved", enrollment: updated, groupName: group?.name ?? null, approvedByName: null, noGroup: group === null };
 }
 
 export type RejectResult = {

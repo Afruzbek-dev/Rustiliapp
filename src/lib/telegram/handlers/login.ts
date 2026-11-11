@@ -142,6 +142,9 @@ export function registerLogin(bot: Bot, getDb: () => Db) {
       } catch (error) {
         logBotError(error, ctx.update.update_id); // never fails the student's flow
       }
+    } else if (enrollment.reason === "exists" && enrollment.enrollment.status === "pending") {
+      // The staff message may have been lost; re-sending would need state, so only leave a trace.
+      console.info("telegram bot", { op: "ensureEnrollment", note: "pending exists, staff not re-notified", update_id: ctx.update.update_id });
     }
     // The session is only released once the user presses the inline confirm button.
     await ctx.reply(MSG.received, { reply_markup: remove });

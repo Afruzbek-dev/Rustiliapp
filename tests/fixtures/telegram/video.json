@@ -1,0 +1,17 @@
+{
+  "update_id": 203,
+  "message": {
+    "message_id": 12,
+    "date": 1760000200,
+    "chat": { "id": 777, "type": "private", "first_name": "Ali" },
+    "from": { "id": 777, "is_bot": false, "first_name": "Ali", "last_name": "Valiyev", "username": "ali" },
+    "video": {
+      "file_id": "FILE-ID-2",
+      "file_unique_id": "UNIQ-2",
+      "width": 640,
+      "height": 480,
+      "duration": 30,
+      "file_size": 5000000
+    }
+  }
+}

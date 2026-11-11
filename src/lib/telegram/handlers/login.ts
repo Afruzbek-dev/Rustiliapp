@@ -58,10 +58,10 @@ export function confirmText(nonce: string, createdAt: string): string {
 export function registerLogin(bot: Bot, getDb: () => Db) {
   const priv = bot.chatType("private");
 
-  priv.command("start", async (ctx) => {
+  priv.command("start", async (ctx, next) => {
     const payload = ctx.match?.trim() ?? "";
     const from = ctx.from;
-    if (!from || !payload.startsWith(START_PREFIX)) return; // other deep links are handled elsewhere
+    if (!from || !payload.startsWith(START_PREFIX)) return next(); // other deep links are handled elsewhere
     const nonce = payload.slice(START_PREFIX.length);
     if (!NONCE_RE.test(nonce)) {
       await ctx.reply(MSG.expired);

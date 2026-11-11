@@ -1,0 +1,15 @@
+{
+  "update_id": 500,
+  "callback_query": {
+    "id": "cb500",
+    "from": { "id": 101, "is_bot": false, "first_name": "Kurator" },
+    "message": {
+      "message_id": 42,
+      "date": 1760000300,
+      "chat": { "id": -100500, "type": "supergroup", "title": "Guruh A" },
+      "video": { "file_id": "X", "file_unique_id": "Y", "width": 640, "height": 480, "duration": 10 }
+    },
+    "chat_instance": "1",
+    "data": "rv:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:pr:4"
+  }
+}

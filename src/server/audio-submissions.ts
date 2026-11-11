@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { tashkentDay } from "@/lib/gamification/day";
 import { completePart, type ProgressStore } from "./progress";
+import { runSubmissionCompletion } from "./submission-completion";
 
 /** Allowed recording formats -> object extension. Kept in sync with the bucket's allowed_mime_types. */
 export const AUDIO_MIME_EXT = { "audio/webm": "webm", "audio/mp4": "mp4", "audio/ogg": "ogg" } as const;
@@ -63,6 +64,10 @@ export interface AudioStore extends ProgressStore {
   getExerciseInfo(exerciseId: string): Promise<{ partId: string | null; courseId: string } | null>;
   /** Marks the submission as fully processed (part, daily task and curator notice done). */
   markNotified(submissionId: string): Promise<void>;
+  /** Atomic lease (SQL claim_submission_notification): true for exactly one concurrent caller. */
+  claimNotification(submissionId: string, studentId: string): Promise<boolean>;
+  /** Gives the lease back after a failure. */
+  releaseNotification(submissionId: string): Promise<void>;
 }
 
 export interface AudioDeps {
@@ -163,23 +168,25 @@ export async function handleAudioComplete(deps: AudioDeps, req: { userId: string
       await store.markComplete(sub.id, studentId, obj.name);
     }
 
-    // Idempotent by STATE, not by transition: while notified_at is null the remaining work runs
-    // (each step is itself idempotent: completePart pays once; the bump is skipped when another
-    // submission already counted today). A failure leaves notified_at null so a retry finishes it.
-    // A notifier failure is logged and leaves notified_at null (retried on the next complete call)
-    // without failing the student's request.
+    // Idempotent by STATE plus an atomic lease: while notified_at is null exactly ONE concurrent
+    // caller wins claimNotification and runs the remaining work (completePart pays once; the bump is
+    // skipped when another submission already counted today). A work failure releases the lease and
+    // fails the request so a retry finishes it; a notifier failure is logged, releases the lease and
+    // leaves notified_at null without failing the student's request (see submission-completion.ts).
     const alreadyDone = !!sub.storagePath && !!sub.notifiedAt;
     if (!sub.notifiedAt) {
-      if (info.partId) await completePart(store, studentId, info.partId);
       const now = (deps.now ?? (() => new Date()))();
       const dayStart = new Date(`${tashkentDay(now)}T00:00:00+05:00`).toISOString();
-      if (!(await store.hasOtherCompletedSince(studentId, sub.id, dayStart))) await deps.bumpSpeaking(studentId);
-      try {
-        await deps.notify(sub.id);
-        await store.markNotified(sub.id);
-      } catch (e) {
-        console.error("audio-submissions: notify failed", e instanceof Error ? e.name : "unknown");
-      }
+      await runSubmissionCompletion({
+        claim: () => store.claimNotification(sub.id, studentId),
+        release: () => store.releaseNotification(sub.id),
+        work: async () => {
+          if (info.partId) await completePart(store, studentId, info.partId);
+          if (!(await store.hasOtherCompletedSince(studentId, sub.id, dayStart))) await deps.bumpSpeaking(studentId);
+        },
+        notify: () => deps.notify(sub.id),
+        markNotified: () => store.markNotified(sub.id),
+      });
     }
     return { status: 200, json: { ok: true, alreadyComplete: alreadyDone } };
   } catch (e) {

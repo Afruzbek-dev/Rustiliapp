@@ -1,17 +1,35 @@
 import { notFound } from "next/navigation";
 import { LessonPlayer } from "@/components/lesson/LessonPlayer";
+import { createClient } from "@/lib/supabase/server";
 import { requireStudent } from "@/server/guards";
 import { signLessonMedia } from "@/server/content-media";
 import { getLessonPart } from "@/server/lesson";
+import { getLessonPreview } from "@/server/lesson-preview";
 
 export const dynamic = "force-dynamic";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export default async function LessonPage({ params }: { params: Promise<{ partId: string }> }) {
+export default async function LessonPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ partId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { partId } = await params;
-  const { user } = await requireStudent();
+  const sp = await searchParams;
+  const { user, role } = await requireStudent();
   if (!UUID.test(partId)) notFound();
+
+  // Teacher / admin preview: ?preview=1 is honoured ONLY for those roles (students and curators fall
+  // through to the normal flow), shows drafts, is read-only and RLS decides which course is visible.
+  if (sp.preview === "1" && (role === "teacher" || role === "admin")) {
+    const data = await getLessonPreview(await createClient(), partId);
+    if (!data) notFound();
+    const media = await signLessonMedia(data.blocks);
+    return <LessonPlayer data={data} media={media} preview={{ exitHref: `/teacher/lessons/${data.lesson.id}` }} />;
+  }
 
   // RLS-scoped reads; a locked / unknown / unpublished part is a 404.
   const data = await getLessonPart(user.id, partId);

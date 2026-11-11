@@ -4,7 +4,7 @@ import type { ChoosePayload, ClassifyPayload, ConjugatePayload, FillBlankPayload
 const s = z.string().max(2000);
 const id = z.string().min(1).max(64);
 
-const schemas = {
+export const exercisePayloadSchemas = {
   classify: z.object({
     items: z.array(z.object({ id, text: s })).min(1).max(100),
     buckets: z.array(z.object({ id, label: s, hint: s.optional() })).min(2).max(12),
@@ -31,7 +31,7 @@ export type PlayableExercise =
 
 /** Validates an exercise payload for its type; null when the type is not playable or the payload is malformed. */
 export function parseExercisePayload(type: string, payload: unknown): PlayableExercise | null {
-  if (!Object.prototype.hasOwnProperty.call(schemas, type)) return null;
-  const parsed = schemas[type as keyof typeof schemas].safeParse(payload);
+  if (!Object.prototype.hasOwnProperty.call(exercisePayloadSchemas, type)) return null;
+  const parsed = exercisePayloadSchemas[type as keyof typeof exercisePayloadSchemas].safeParse(payload);
   return parsed.success ? ({ type, payload: parsed.data } as PlayableExercise) : null;
 }

@@ -99,16 +99,19 @@ describe('0009 storage: submissions bucket', () => {
     expect(await read(world.curator, forged)).toHaveLength(0);
   });
 
-  it('nobody authenticated can write objects', async () => {
+  it('nobody authenticated can write objects of the submissions bucket', async () => {
+    // 0016 re-grants write privileges on storage.objects for the teacher `content` policies, so the
+    // submissions bucket is now protected by RLS (no write policy exists for it) instead of by grants.
     for (const uid of [student, world.curator, world.teacher]) {
       await expect(
         withUser(uid, (q) => q(`insert into storage.objects (bucket_id, name) values ('submissions', $1)`, [`${uid}/${randomUUID()}.webm`])),
-      ).rejects.toThrow(/permission denied/);
-      await expect(withUser(uid, (q) => q(`update storage.objects set name = name || 'x' where name = $1`, [name]))).rejects.toThrow(
-        /permission denied/,
-      );
-      await expect(withUser(uid, (q) => q(`delete from storage.objects where name = $1`, [name]))).rejects.toThrow(/permission denied/);
+      ).rejects.toThrow(/permission denied|row-level security/);
+      const upd = await withUser(uid, (q) => q(`update storage.objects set name = name || 'x' where name = $1 returning name`, [name])).catch(() => []);
+      expect(upd).toHaveLength(0);
+      const del = await withUser(uid, (q) => q(`delete from storage.objects where name = $1 returning name`, [name])).catch(() => []);
+      expect(del).toHaveLength(0);
     }
+    expect(await sql(`select 1 from storage.objects where name = $1`, [name])).toHaveLength(1);
   });
 
   it('authenticated cannot truncate or alter buckets', async () => {

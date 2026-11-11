@@ -9,6 +9,7 @@ import { UNSUPPORTED_BLOCK_TEXT } from "@/lib/blocks/types";
 import type { LessonPartData } from "@/server/lesson";
 import { AudioBlock } from "./blocks/AudioBlock";
 import { ExerciseBlock } from "./blocks/ExerciseBlock";
+import { ExercisePreview } from "./blocks/ExercisePreview";
 import { RuleImageBlock } from "./blocks/RuleImageBlock";
 import { SpeakingBlock } from "./blocks/SpeakingBlock";
 import { TextBlock } from "./blocks/TextBlock";
@@ -26,6 +27,8 @@ export interface LessonPlayerProps {
    * (the student leaves the player for /speak and comes back).
    */
   initialIndex?: number;
+  /** Teacher preview: read-only, nothing is submitted or completed; the close button goes to exitHref. */
+  preview?: { exitHref: string };
 }
 
 type MissingItem = { exerciseId: string; kind: "exercise" | "speaking" };
@@ -36,7 +39,7 @@ type Phase =
   | { kind: "missing"; items: MissingItem[] }
   | { kind: "done"; xp: number };
 
-export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProps) {
+export function LessonPlayer({ data, media, initialIndex = 0, preview }: LessonPlayerProps) {
   const router = useRouter();
   const total = data.blocks.length;
   const [index, setIndex] = useState(() => Math.min(Math.max(0, Math.floor(initialIndex)), Math.max(0, total - 1)));
@@ -66,12 +69,18 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
   const markDone = useCallback(() => {
     setDone((prev) => (prev.has(blockId) ? prev : new Set(prev).add(blockId)));
   }, [blockId]);
-  const exit = useCallback(() => router.push("/path"), [router]);
+  const exitTo = preview?.exitHref ?? "/path";
+  const exit = useCallback(() => router.push(exitTo), [router, exitTo]);
 
   const isLast = index === total - 1;
   const canNext = done.has(blockId);
 
   const finish = useCallback(async () => {
+    if (preview) {
+      // preview never completes a part (no progress, no XP)
+      router.push(preview.exitHref);
+      return;
+    }
     setPhase({ kind: "completing" });
     try {
       const res = await fetch("/api/lesson/complete", {
@@ -99,7 +108,7 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
     } catch {
       setPhase({ kind: "error", auth: false });
     }
-  }, [data.part.id]);
+  }, [data.part.id, preview, router]);
 
   if (!block) {
     return <ErrorState title="Dars bo'sh" text="Bu darsda hali bloklar yo'q." action={<Button href="/path">Yo&apos;lga qaytish</Button>} />;
@@ -206,10 +215,16 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
       body = <WordsBlock key={block.id} words={data.words} lessonId={data.lesson.id} onDone={markDone} />;
       break;
     case "exercise":
-      body = <ExerciseBlock key={block.id} exercise={exercise(block.payload.exerciseId)} onDone={markDone} onExit={exit} />;
+      body = preview ? (
+        <ExercisePreview key={block.id} exercise={exercise(block.payload.exerciseId)} onDone={markDone} />
+      ) : (
+        <ExerciseBlock key={block.id} exercise={exercise(block.payload.exerciseId)} onDone={markDone} onExit={exit} />
+      );
       break;
     case "speaking":
-      body = (
+      body = preview ? (
+        <ExercisePreview key={block.id} exercise={exercise(block.payload.exerciseId)} speaking onDone={markDone} />
+      ) : (
         <SpeakingBlock
           key={block.id}
           exercise={exercise(block.payload.exerciseId)}
@@ -227,7 +242,7 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
     <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col">
       <header className="sticky top-0 z-30 flex items-center gap-3 bg-bg px-4 py-3">
         <Link
-          href="/path"
+          href={exitTo}
           aria-label="Darsni yopish"
           className="inline-flex size-11 shrink-0 items-center justify-center rounded-[var(--radius-sm)] border-2 border-border-strong bg-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-info-strong"
         >
@@ -251,7 +266,14 @@ export function LessonPlayer({ data, media, initialIndex = 0 }: LessonPlayerProp
         </span>
       </header>
 
-      <main ref={mainRef} className="flex-1 px-4 pt-2 pb-28">{body}</main>
+      <main ref={mainRef} className="flex-1 px-4 pt-2 pb-28">
+        {preview && (
+          <p role="status" className="mb-3 rounded-[var(--radius-md)] bg-info-bg p-3 font-bold text-info-strong">
+            Ko&apos;rib chiqish rejimi: o&apos;quvchi ko&apos;rinishi, natijalar saqlanmaydi.
+          </p>
+        )}
+        {body}
+      </main>
 
       <footer className="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-md border-t-2 border-border bg-bg px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <Button
